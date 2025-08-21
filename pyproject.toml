@@ -1,0 +1,17 @@
+[project]
+name = "emotional-n-back"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Paul Vinell", email = "paul.vinell@hemnet.se" }
+]
+requires-python = ">=3.13"
+dependencies = []
+
+[project.scripts]
+emotional-n-back = "emotional_n_back:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
