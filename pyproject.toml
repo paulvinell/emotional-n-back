@@ -7,10 +7,12 @@ authors = [
     { name = "Paul Vinell", email = "paul.vinell@hemnet.se" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "typer>=0.16.1",
+]
 
 [project.scripts]
-emotional-n-back = "emotional_n_back:main"
+nback = "emotional_n_back.main:app"
 
 [build-system]
 requires = ["hatchling"]
