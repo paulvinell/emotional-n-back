@@ -1,3 +1,4 @@
+import math
 import random
 
 
@@ -28,16 +29,103 @@ class NBackPartialSequence:
         )
         assert distinct_items > 0, "distinct_items must be positive"
 
-    def generate(self):
+        self.sequence, self.truth = self.generate()
+
+    def generate(self) -> tuple[list[int], list[bool]]:
         """
         To generate a sequence, we iterate in pairs over the
         length of the sequence, and with some probability we
         repeat the previous item.
         """
         sequence = [0] * self.length
+        truth = [False] * self.length
         for i in range(1, self.length):
             if random.random() < self.repeat_probability:
                 sequence[i] = sequence[i - 1]
+                truth[i] = True
             else:
                 sequence[i] = random.randint(1, self.distinct_items)
-        return sequence
+        return sequence, truth
+
+    def __len__(self) -> int:
+        """
+        Get the length of the sequence.
+        """
+        return self.length
+
+    def __iter__(self):
+        """
+        Iterate over the sequence.
+        """
+        for i in range(self.length):
+            yield self.sequence[i], self.truth[i]
+
+    def __next__(self):
+        """
+        Get the next item in the sequence.
+        """
+        if not self.sequence:
+            raise StopIteration
+        return self.sequence.pop(0), self.truth.pop(0)
+
+
+class NBackSequence:
+    """
+    NBackSequence is a wrapper around NBackPartialSequence
+    that generates a sequence of partial sequences.
+    """
+
+    def __init__(self, length: int, n: int, **kwargs):
+        self.length = length
+        self.n = n
+        self.partial_sequence_length = math.ceil(length / n)
+        self.partial_sequences = [
+            NBackPartialSequence(self.partial_sequence_length, **kwargs)
+            for _ in range(n)
+        ]
+
+        # for __next__
+        self.current_i = 0
+        self.current_j = 0
+        self.current_total = 0
+
+    def __len__(self) -> int:
+        """
+        Get the length of the sequence.
+        """
+        return self.length
+
+    def __iter__(self):
+        """
+        Iterate over the sequence.
+        """
+        total = 0
+        for i in range(self.partial_sequence_length):
+            for j in range(self.n):
+                if total >= self.length:
+                    return
+
+                yield (
+                    self.partial_sequences[j].sequence[i],
+                    self.partial_sequences[j].truth[i],
+                )
+                total += 1
+
+    def __next__(self):
+        """
+        Get the next item in the sequence.
+        """
+        if self.current_total >= self.length:
+            raise StopIteration
+
+        item = self.partial_sequences[self.current_j].sequence[self.current_i]
+        truth = self.partial_sequences[self.current_j].truth[self.current_i]
+
+        self.current_total += 1
+        self.current_i += 1
+
+        if self.current_i >= self.partial_sequence_length:
+            self.current_i = 0
+            self.current_j += 1
+
+        return item, truth
