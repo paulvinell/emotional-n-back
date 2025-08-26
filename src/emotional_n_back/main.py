@@ -1,5 +1,9 @@
+import os
+import shutil
+
 import typer
 
+from emotional_n_back.constants import DATA_DIR
 from emotional_n_back.game import DualNBackPygame
 from emotional_n_back.nback import DualNBackTerminal
 
@@ -36,6 +40,39 @@ def gui():
         isi_ms=500,
         show_feedback_ms=300,
     ).run()
+
+
+@app.command()
+def kdef():
+    kdef_dst = DATA_DIR / "kdef"
+    if kdef_dst.exists():
+        print(f"{kdef_dst} already exists, deleting...")
+        shutil.rmtree(kdef_dst)
+
+    import kagglehub
+
+    os.environ["DISABLE_COLAB_CACHE"] = "true"
+    os.environ["KAGGLEHUB_CACHE"] = str(DATA_DIR)
+    kagglehub.dataset_download("chenrich/kdef-database", force_download=True)
+
+    kaggle_datasets_dir = DATA_DIR / "datasets"
+    src_dir = kaggle_datasets_dir / "chenrich" / "kdef-database"
+    versions = list(src_dir.glob("versions/*"))
+    assert len(versions) == 1, "Expected exactly one version of the KDEF dataset"
+
+    kdef_src = versions[0]
+    if kdef_dst.exists():
+        if any(kdef_dst.iterdir()):
+            raise FileExistsError(f"{kdef_dst} already exists and is not empty")
+    else:
+        kdef_dst.mkdir(parents=True)
+
+    for item in kdef_src.iterdir():
+        shutil.move(str(item), kdef_dst / item.name)
+
+    # Clean up Kaggle datasets directory
+    if kaggle_datasets_dir.exists():
+        shutil.rmtree(kaggle_datasets_dir)
 
 
 if __name__ == "__main__":
