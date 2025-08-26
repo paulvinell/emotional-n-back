@@ -4,7 +4,7 @@ import shutil
 import typer
 
 from emotional_n_back.constants import DATA_DIR
-from emotional_n_back.game import DualNBackPygame
+from emotional_n_back.game import DualNBackPygame, EmotionalDualNBack
 from emotional_n_back.nback import DualNBackTerminal
 
 app = typer.Typer()
@@ -40,6 +40,21 @@ def gui():
         isi_ms=500,
         show_feedback_ms=300,
     ).run()
+
+
+@app.command()
+def emo():
+    game = EmotionalDualNBack(
+        length=20,
+        n=2,
+        repeat_probability=0.3,
+        seed=42,
+        stim_ms=900,
+        isi_ms=500,
+        feedback_ms=220,
+        show_debug_labels=False,  # set True to display current emotions + GT
+    )
+    game.run()
 
 
 @app.command()
