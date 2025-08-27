@@ -28,7 +28,12 @@ def cli():
 
 
 @app.command()
-def gui(n: int = 2, stim_ms: int = 2000, seed: int | None = None):
+def gui(
+    n: int = 2,
+    stim_ms: int = 2000,
+    seed: int | None = None,
+    help_labels: bool = False,
+):
     game = EmotionalDualNBack(
         length=20,
         n=n,
@@ -38,6 +43,7 @@ def gui(n: int = 2, stim_ms: int = 2000, seed: int | None = None):
         isi_ms=500,
         feedback_ms=220,
         show_debug_labels=False,  # set True to display current emotions + GT
+        show_help_labels=help_labels,
     )
     game.run()
 

@@ -53,6 +53,11 @@ class EmotionalDualNBack:
     Visual = KDEF emotion class (image shown centered).
     Auditory = MAV emotion class (random wav for that emotion is played).
     Matching rule: current emotion == emotion n steps back (per modality).
+
+    Keys:
+      1 -> Image match (press independently any time during the trial)
+      2 -> Audio match (press independently any time during the trial)
+      ESC -> Quit
     """
 
     def __init__(
@@ -64,9 +69,10 @@ class EmotionalDualNBack:
         seed: int | None = None,
         stim_ms: int = 1000,
         isi_ms: int = 500,
-        feedback_ms: int = 300,  # kept for compatibility; no big overlay used now
+        feedback_ms: int = 300,  # kept for compatibility; not used for an overlay
         window_size=(900, 650),
         show_debug_labels: bool = False,
+        show_help_labels: bool = False,
     ):
         if seed is not None:
             random.seed(seed)
@@ -77,6 +83,7 @@ class EmotionalDualNBack:
         self.isi_ms = isi_ms
         self.feedback_ms = feedback_ms
         self.show_debug_labels = show_debug_labels
+        self.show_help_labels = show_help_labels
 
         # Load datasets
         self.kdef = KDEFLoader()
@@ -117,7 +124,6 @@ class EmotionalDualNBack:
 
         # Layout
         self.image_rect = Rect(100, 90, 400, 400)  # fixed image box
-        # status boxes (no “letter box” anymore)
         self.status_img_rect = Rect(540, 140, 300, 90)
         self.status_aud_rect = Rect(540, 250, 300, 90)
 
@@ -127,8 +133,8 @@ class EmotionalDualNBack:
 
         # Stats
         self.t = 0
-        self.v_hist = []  # emotion index history (visual)
-        self.a_hist = []  # emotion index history (audio)
+        self.v_hist: list[int] = []  # emotion index history (visual)
+        self.a_hist: list[int] = []  # emotion index history (audio)
         self.v_correct = 0
         self.a_correct = 0
 
@@ -153,24 +159,37 @@ class EmotionalDualNBack:
         return surf
 
     def _draw_status_box(
-        self, rect: pygame.Rect, label: str, answered: bool, correct: bool
+        self,
+        rect: pygame.Rect,
+        label: str,
+        answered: bool,
+        correct: bool,
+        subtitle: str | None = None,
     ):
-        # border (gray)
-        pygame.draw.rect(
-            self.screen, (40, 42, 48), rect, border_radius=12
-        )  # subtle panel bg
+        # Panel and border (gray)
+        pygame.draw.rect(self.screen, (40, 42, 48), rect, border_radius=12)
         pygame.draw.rect(self.screen, (160, 160, 170), rect, width=2, border_radius=12)
 
-        # fill only if answered: green/red with transparency
+        # Fill only if answered: green/red with transparency
         if answered:
             fill = (40, 160, 90, 140) if correct else (180, 60, 60, 140)
             overlay = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
             overlay.fill(fill)
             self.screen.blit(overlay, rect.topleft)
 
-        # label centered
+        # Main label
         lbl = self.font_big.render(label, True, (235, 235, 235))
-        self.screen.blit(lbl, lbl.get_rect(center=rect.center))
+        if subtitle and self.show_help_labels:
+            lbl_rect = lbl.get_rect(center=(rect.centerx, rect.y + rect.h * 0.40))
+            self.screen.blit(lbl, lbl_rect)
+
+            # Subtitle (shown once answered, persists until next trial)
+            sub = self.font_small.render(subtitle, True, (235, 235, 235))
+            sub_rect = sub.get_rect(center=(rect.centerx, rect.y + rect.h * 0.72))
+            self.screen.blit(sub, sub_rect)
+        else:
+            lbl_rect = lbl.get_rect(center=rect.center)
+            self.screen.blit(lbl, lbl_rect)
 
     def _draw_frame(
         self,
@@ -178,8 +197,10 @@ class EmotionalDualNBack:
         *,
         answered_v: bool,
         correct_v_now: bool,
+        subtitle_v: str | None,
         answered_a: bool,
         correct_a_now: bool,
+        subtitle_a: str | None,
         labels: dict[str, str] | None = None,
     ):
         self.screen.fill((20, 22, 26))
@@ -205,11 +226,15 @@ class EmotionalDualNBack:
             rect = image.get_rect(center=self.image_rect.center)
             self.screen.blit(image, rect)
 
-        # Status boxes (always visible)
-        self._draw_status_box(self.status_img_rect, "Image", answered_v, correct_v_now)
-        self._draw_status_box(self.status_aud_rect, "Audio", answered_a, correct_a_now)
+        # Status boxes
+        self._draw_status_box(
+            self.status_img_rect, "Image", answered_v, correct_v_now, subtitle_v
+        )
+        self._draw_status_box(
+            self.status_aud_rect, "Audio", answered_a, correct_a_now, subtitle_a
+        )
 
-        # Optional debug labels (under status boxes)
+        # Optional debug labels
         if labels and self.show_debug_labels:
             y = self.status_aud_rect.bottom + 12
             for k, v in labels.items():
@@ -259,9 +284,12 @@ class EmotionalDualNBack:
             # Per-trial input state (independent)
             answered_v = False
             answered_a = False
-            # correctness “now” only shown if answered; remains from last press
-            correct_v_now = False
+            correct_v_now = False  # correctness for the press (if answered)
             correct_a_now = False
+            subtitle_v = (
+                None  # "This was: <emotion>" after answer, persists until next trial
+            )
+            subtitle_a = None
 
             # --- Stimulus phase ---
             if sound:
@@ -277,7 +305,7 @@ class EmotionalDualNBack:
                         elif event.key == pygame.K_1 and not answered_v:
                             answered_v = True
                             correct_v_now = gt_v
-                            # beep logic on correct press
+                            subtitle_v = f"This was: {v_emotion}"
                             if correct_v_now:
                                 if answered_a and correct_a_now and self.beep_double:
                                     self.beep_double.play()
@@ -286,6 +314,7 @@ class EmotionalDualNBack:
                         elif event.key == pygame.K_2 and not answered_a:
                             answered_a = True
                             correct_a_now = gt_a
+                            subtitle_a = f"This was: {a_emotion}"
                             if correct_a_now:
                                 if answered_v and correct_v_now and self.beep_double:
                                     self.beep_double.play()
@@ -296,8 +325,10 @@ class EmotionalDualNBack:
                     image,
                     answered_v=answered_v,
                     correct_v_now=correct_v_now,
+                    subtitle_v=subtitle_v,
                     answered_a=answered_a,
                     correct_a_now=correct_a_now,
+                    subtitle_a=subtitle_a,
                     labels={
                         "Image emotion": v_emotion,
                         "Audio emotion": a_emotion,
@@ -319,6 +350,7 @@ class EmotionalDualNBack:
                         elif event.key == pygame.K_1 and not answered_v:
                             answered_v = True
                             correct_v_now = gt_v
+                            subtitle_v = f"This was: {v_emotion}"
                             if correct_v_now:
                                 if answered_a and correct_a_now and self.beep_double:
                                     self.beep_double.play()
@@ -327,6 +359,7 @@ class EmotionalDualNBack:
                         elif event.key == pygame.K_2 and not answered_a:
                             answered_a = True
                             correct_a_now = gt_a
+                            subtitle_a = f"This was: {a_emotion}"
                             if correct_a_now:
                                 if answered_v and correct_v_now and self.beep_double:
                                     self.beep_double.play()
@@ -337,8 +370,10 @@ class EmotionalDualNBack:
                     None,
                     answered_v=answered_v,
                     correct_v_now=correct_v_now,
+                    subtitle_v=subtitle_v,
                     answered_a=answered_a,
                     correct_a_now=correct_a_now,
+                    subtitle_a=subtitle_a,
                     labels=None,
                 )
                 self.clock.tick(120)
