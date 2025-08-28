@@ -4,7 +4,7 @@ import shutil
 import typer
 
 from emotional_n_back.constants import DATA_DIR
-from emotional_n_back.game import EmotionalDualNBack
+from emotional_n_back.game import AudioNBackGame, EmotionalDualNBack, VisualNBackGame
 from emotional_n_back.nback import DualNBackTerminal
 
 app = typer.Typer()
@@ -28,7 +28,7 @@ def cli():
 
 
 @app.command()
-def gui(
+def dual(
     n: int = 2,
     stim_ms: int = 2000,
     seed: int | None = None,
@@ -37,11 +37,50 @@ def gui(
     game = EmotionalDualNBack(
         length=20,
         n=n,
-        repeat_probability=0.2,
+        repeat_probability=0.25,
         seed=seed,
         stim_ms=stim_ms,
         isi_ms=500,
-        feedback_ms=220,
+        show_debug_labels=False,  # set True to display current emotions + GT
+        show_help_labels=help_labels,
+    )
+    game.run()
+
+
+@app.command()
+def visual(
+    n: int = 2,
+    stim_ms: int = 2000,
+    seed: int | None = None,
+    help_labels: bool = False,
+):
+    game = VisualNBackGame(
+        length=20,
+        n=n,
+        repeat_probability=0.5,
+        seed=seed,
+        stim_ms=stim_ms,
+        isi_ms=500,
+        show_debug_labels=False,  # set True to display current emotions + GT
+        show_help_labels=help_labels,
+    )
+    game.run()
+
+
+@app.command()
+def audio(
+    n: int = 2,
+    stim_ms: int = 2000,
+    seed: int | None = None,
+    help_labels: bool = False,
+):
+    game = AudioNBackGame(
+        length=20,
+        n=n,
+        repeat_probability=0.5,
+        seed=seed,
+        stim_ms=stim_ms,
+        isi_ms=500,
         show_debug_labels=False,  # set True to display current emotions + GT
         show_help_labels=help_labels,
     )
