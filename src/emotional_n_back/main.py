@@ -29,13 +29,14 @@ def cli():
 
 @app.command()
 def dual(
+    length: int = 20,
     n: int = 2,
     stim_ms: int = 2000,
     seed: int | None = None,
     help_labels: bool = False,
 ):
     game = EmotionalDualNBack(
-        length=20,
+        length=length,
         n=n,
         repeat_probability=0.25,
         seed=seed,
@@ -49,13 +50,14 @@ def dual(
 
 @app.command()
 def visual(
+    length: int = 20,
     n: int = 2,
     stim_ms: int = 2000,
     seed: int | None = None,
     help_labels: bool = False,
 ):
     game = VisualNBackGame(
-        length=20,
+        length=length,
         n=n,
         repeat_probability=0.5,
         seed=seed,
@@ -69,13 +71,14 @@ def visual(
 
 @app.command()
 def audio(
+    length: int = 20,
     n: int = 2,
     stim_ms: int = 2000,
     seed: int | None = None,
     help_labels: bool = False,
 ):
     game = AudioNBackGame(
-        length=20,
+        length=length,
         n=n,
         repeat_probability=0.5,
         seed=seed,

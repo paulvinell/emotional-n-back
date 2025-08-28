@@ -1,8 +1,7 @@
 # nback_refactor.py
-import math
 import random
 from abc import ABC, abstractmethod
-from typing import Iterable, Optional
+from typing import Optional
 
 import numpy as np
 import pygame
@@ -55,20 +54,22 @@ class Modality(ABC):
       - stimulus selection / preloading
       - drawing its own status panel
       - per-trial state (answered?, correct?, subtitle?)
-    The game drives: next_stimulus -> (stim phase/isi) -> score.
     """
 
     def __init__(self, label: str, trigger_key: int):
         self.label = label
         self.trigger_key = trigger_key
         # Per-trial state
-        self.answered = False
-        self.correct_on_press = False
-        self.subtitle: Optional[str] = None
-        # Ground-truth for current trial (computed by Base game)
-        self.gt_is_match_nback = False
-        # The “truth_prev” from NBackSequence (same-as-previous step, for debug)
-        self.truth_prev: Optional[bool] = None
+        self.answered = False  # did user press this modality key?
+        self.correct_on_press = (
+            False  # correctness of that press (only set if answered)
+        )
+        self.subtitle: Optional[str] = None  # "This was: <emotion>" after press
+        # Truth flags
+        self.gt_is_match_nback = False  # true n-back correctness for this trial
+        self.truth_prev: Optional[bool] = (
+            None  # from NBackSequence: same-as-previous (debug)
+        )
         # UI
         self.panel_rect: Optional[Rect] = None
 
@@ -93,10 +94,7 @@ class Modality(ABC):
         """Draw the main stimulus (visual draws image; audio draws nothing)."""
 
     def try_answer(self) -> bool:
-        """
-        Register a single press. Returns True if this was the first press.
-        The correctness is evaluated immediately vs current gt.
-        """
+        """Register a single press; returns True iff first time for this trial."""
         if self.answered:
             return False
         self.answered = True
@@ -106,14 +104,27 @@ class Modality(ABC):
 
     @abstractmethod
     def build_subtitle(self) -> Optional[str]:
-        """E.g. 'This was: <emotion>' after press, persistent until next trial."""
+        """E.g. 'This was: <emotion>' after press (persists until next trial)."""
 
     def current_debug(self) -> dict[str, str]:
-        """Optional debug info (like emotion names, truth_prev)."""
+        """Optional debug info."""
         return {}
 
-    # Panel rendering is shared; subclasses may override for custom visuals if needed.
-    def draw_panel(self, screen: pygame.Surface, font_big, font_small):
+    # Panel rendering (shared)
+    def draw_panel(
+        self,
+        screen: pygame.Surface,
+        font_big,
+        font_small,
+        *,
+        show_help_labels: bool,
+        fill_mode: str,
+    ):
+        """
+        fill_mode:
+          - "answered": fill green/red only if answered (stimulus phase)
+          - "final": fill by final correctness (feedback/ISI)
+        """
         assert self.panel_rect is not None, "panel_rect not set via layout"
         rect = self.panel_rect
 
@@ -121,25 +132,37 @@ class Modality(ABC):
         pygame.draw.rect(screen, (40, 42, 48), rect, border_radius=12)
         pygame.draw.rect(screen, (160, 160, 170), rect, width=2, border_radius=12)
 
-        # Fill once answered
-        if self.answered:
-            fill = (40, 160, 90, 140) if self.correct_on_press else (180, 60, 60, 140)
+        # Decide fill
+        do_fill = False
+        fill_green = False
+        if fill_mode == "answered":
+            if self.answered:
+                do_fill = True
+                fill_green = self.correct_on_press
+        else:  # "final"
+            # Final correctness: pressed == match_nback
+            do_fill = True
+            fill_green = self.answered == self.gt_is_match_nback
+
+        if do_fill:
+            fill = (40, 160, 90, 140) if fill_green else (180, 60, 60, 140)
             overlay = pygame.Surface((rect.w, rect.h), pygame.SRCALPHA)
             overlay.fill(fill)
             screen.blit(overlay, rect.topleft)
 
-        # Main label
-        lbl = font_big.render(self.label, True, (235, 235, 235))
-        # If subtitle exists (help mode), position the label higher
-        if self.subtitle:
-            lbl_rect = lbl.get_rect(center=(rect.centerx, rect.y + rect.h * 0.40))
-            screen.blit(lbl, lbl_rect)
+        # Text layout
+        main_label = font_big.render(self.label, True, (235, 235, 235))
+        if self.subtitle and show_help_labels:
+            main_rect = main_label.get_rect(
+                center=(rect.centerx, rect.y + rect.h * 0.40)
+            )
+            screen.blit(main_label, main_rect)
             sub = font_small.render(self.subtitle, True, (235, 235, 235))
             sub_rect = sub.get_rect(center=(rect.centerx, rect.y + rect.h * 0.72))
             screen.blit(sub, sub_rect)
         else:
-            lbl_rect = lbl.get_rect(center=rect.center)
-            screen.blit(lbl, lbl_rect)
+            main_rect = main_label.get_rect(center=rect.center)
+            screen.blit(main_label, main_rect)
 
 
 # -------------------- Visual Modality --------------------
@@ -150,6 +173,7 @@ class VisualModality(Modality):
         self.current_emotion_name: Optional[str] = None
         self.current_image_surface: Optional[pygame.Surface] = None
         self._img_cache: dict[str, pygame.Surface] = {}
+        self._current_image_path: Optional[str] = None
 
     def _load_fit(self, path: str, box: Rect) -> pygame.Surface:
         if path in self._img_cache:
@@ -162,20 +186,17 @@ class VisualModality(Modality):
         return surf
 
     def next_stimulus(self, idx_value: int) -> None:
-        # Map class index -> emotion name (0-based in loader, our idx_value is 1-based)
         self.current_emotion_name = self.kdef.get_emotion(idx_value - 1)
         img_path = self.kdef.get_random_image(self.current_emotion_name)
-        # Surface is scaled at draw time (needs target rect); keep raw path cached
-        self.current_image_surface = None  # will set in draw_stimulus using box
-
-        # stash the chosen path so draw can load/scale once we know the rect
         self._current_image_path = str(img_path)
+        self.current_image_surface = None
 
     def play_stimulus(self) -> None:
-        # Nothing to “play” immediately for visuals; drawing happens in draw_stimulus
         pass
 
     def draw_stimulus(self, screen: pygame.Surface, rect: Rect) -> None:
+        if self._current_image_path is None:
+            return
         if self.current_image_surface is None:
             self.current_image_surface = self._load_fit(self._current_image_path, rect)
         if self.current_image_surface:
@@ -191,8 +212,8 @@ class VisualModality(Modality):
 
     def current_debug(self) -> dict[str, str]:
         return {
-            "Image emotion": self.current_emotion_name or "",
-            "Same-as-previous (seq truth)": "Yes" if self.truth_prev else "No",
+            "emotion": self.current_emotion_name or "",
+            "seq_same_as_prev": "Yes" if self.truth_prev else "No",
         }
 
 
@@ -219,7 +240,7 @@ class AudioModality(Modality):
             self.current_sound.play()
 
     def draw_stimulus(self, screen: pygame.Surface, rect: Rect) -> None:
-        # No explicit audio drawing; leave area blank or let game show placeholder if desired.
+        # No visual for audio; keep stimulus box visible.
         pass
 
     def build_subtitle(self) -> Optional[str]:
@@ -231,8 +252,8 @@ class AudioModality(Modality):
 
     def current_debug(self) -> dict[str, str]:
         return {
-            "Audio emotion": self.current_emotion_name or "",
-            "Same-as-previous (seq truth)": "Yes" if self.truth_prev else "No",
+            "emotion": self.current_emotion_name or "",
+            "seq_same_as_prev": "Yes" if self.truth_prev else "No",
         }
 
 
@@ -243,6 +264,10 @@ class BaseNBackGame(ABC):
       - which modalities to include (build_modalities)
       - layout of panels & stimulus area (layout_ui)
       - help text & key bindings
+    Phases per trial:
+      1) Stimulus (accept input)
+      2) Feedback (show final correctness, accept no input; still show stimulus)
+      3) ISI (blank; accept no input)
     """
 
     def __init__(
@@ -253,16 +278,18 @@ class BaseNBackGame(ABC):
         repeat_probability: float = 0.25,
         seed: Optional[int] = None,
         stim_ms: int = 1000,
-        isi_ms: int = 500,
+        feedback_ms: int = 500,
+        isi_ms: int = 300,
         window_size=(900, 650),
         show_debug_labels: bool = False,
-        show_help_labels: bool = False,
+        show_help_labels: bool = True,
     ):
         if seed is not None:
             random.seed(seed)
         self.length = length
         self.n = n
         self.stim_ms = stim_ms
+        self.feedback_ms = feedback_ms
         self.isi_ms = isi_ms
         self.show_debug_labels = show_debug_labels
         self.show_help_labels = show_help_labels
@@ -280,16 +307,16 @@ class BaseNBackGame(ABC):
         self.beep_double = make_beep(1100, 130, 0.6)
         self.beep_half = make_beep(650, 130, 0.6)
 
-        # Build modalities (and datasets internally if needed)
+        # Build modalities
         self.modalities: list[Modality] = self.build_modalities()
         assert len(self.modalities) in (1, 2), "Only single or dual supported"
 
-        # Layout rects (panel rects assigned here)
+        # Layout rects
         self.stimulus_rect, panel_rects = self.layout_ui(self.screen.get_size())
         for mod, rect in zip(self.modalities, panel_rects):
             mod.panel_rect = rect
 
-        # Sequences per modality (we also keep history to check n-back truth)
+        # Sequences per modality, plus histories (for true n-back)
         self.seq_values: list[list[tuple[int, bool]]] = []
         self.histories: list[list[int]] = [[] for _ in self.modalities]
         for i, mod in enumerate(self.modalities):
@@ -300,11 +327,7 @@ class BaseNBackGame(ABC):
                 repeat_probability=repeat_probability,
                 distinct_items=distinct,
             )
-            # Materialize sequence as [(value, truth_prev), ...]
-            seq = [
-                (v, t) if isinstance((v, t), tuple) else (v, False)
-                for (v, t) in seq_iter
-            ]
+            seq = [(v, t) for (v, t) in seq_iter]  # value + truth_prev from generator
             self.seq_values.append(seq)
 
         # Stats
@@ -314,17 +337,12 @@ class BaseNBackGame(ABC):
     # ---- abstract/overridable ----
     @abstractmethod
     def build_modalities(self) -> list[Modality]: ...
-
     @abstractmethod
     def distinct_items_for(self, modality: Modality) -> int: ...
-
     @abstractmethod
-    def layout_ui(self, window_size: tuple[int, int]) -> tuple[Rect, list[Rect]]:
-        """Return (stimulus_rect, panel_rects)."""
-
+    def layout_ui(self, window_size: tuple[int, int]) -> tuple[Rect, list[Rect]]: ...
     @abstractmethod
     def window_title(self) -> str: ...
-
     @abstractmethod
     def help_text(self) -> str: ...
 
@@ -337,9 +355,15 @@ class BaseNBackGame(ABC):
         tip = self.font_small.render(self.help_text(), True, (210, 210, 210))
         self.screen.blit(tip, (24, 60))
 
-    def _draw_panels(self):
+    def _draw_panels(self, fill_mode: str):
         for mod in self.modalities:
-            mod.draw_panel(self.screen, self.font_big, self.font_small)
+            mod.draw_panel(
+                self.screen,
+                self.font_big,
+                self.font_small,
+                show_help_labels=self.show_help_labels,
+                fill_mode=fill_mode,
+            )
 
     def _draw_debug(self):
         if not self.show_debug_labels:
@@ -360,38 +384,49 @@ class BaseNBackGame(ABC):
         s_txt = self.font_small.render("   ".join(parts), True, (200, 200, 200))
         self.screen.blit(s_txt, (24, self.screen.get_height() - 30))
 
-    # ---- input routing ----
-    def _handle_keydown(self, key: int):
+    # ---- input routing (Stimulus phase only) ----
+    def _handle_keydown(
+        self, key: int, *, beep_state: dict, correct_press_flags: list[bool]
+    ):
         # Route to the modality that owns this key
         for i, mod in enumerate(self.modalities):
             if key == mod.trigger_key and not mod.answered:
                 first = mod.try_answer()
-                if first and mod.correct_on_press:
-                    # If another modality already answered correctly => double beep
-                    other_correct = any(
-                        m is not mod and m.answered and m.correct_on_press
-                        for m in self.modalities
+                if not first:
+                    return
+                if mod.correct_on_press:
+                    correct_press_flags[i] = True
+                    # If another modality already answered correctly this trial => full beep
+                    any_other_correct = any(
+                        j != i and correct_press_flags[j]
+                        for j in range(len(self.modalities))
                     )
-                    if other_correct and self.beep_double:
+                    if any_other_correct and not beep_state["full"]:
                         self.beep_double.play()
-                    elif self.beep_half:
+                        beep_state["full"] = True
+                    elif not beep_state["half"] and not beep_state["full"]:
                         self.beep_half.play()
+                        beep_state["half"] = True
 
     # ---- main loop ----
     def run(self):
         running = True
         while running and self.t < self.length:
-            # Fetch sequence step for each modality (value + truth_prev from generator)
+            # Prepare trial from sequences
             for i, mod in enumerate(self.modalities):
                 value, truth_prev = self.seq_values[i][self.t]
                 mod.reset_trial_state()
-                mod.truth_prev = truth_prev  # from NBackSequence (same-as-previous)
+                mod.truth_prev = truth_prev
                 mod.next_stimulus(value)
-                # Append for true n-back ground truth
+                # history for true n-back
                 self.histories[i].append(value)
                 mod.gt_is_match_nback = nback_match(self.histories[i], self.n)
 
-            # Stimulus phase
+            # Track beeps and correct presses in Stimulus
+            beep_state = {"half": False, "full": False}
+            correct_press_flags = [False for _ in self.modalities]
+
+            # 1) STIMULUS (accept input)
             for mod in self.modalities:
                 mod.play_stimulus()
 
@@ -404,12 +439,15 @@ class BaseNBackGame(ABC):
                         if event.key == pygame.K_ESCAPE:
                             running = False
                         else:
-                            self._handle_keydown(event.key)
+                            self._handle_keydown(
+                                event.key,
+                                beep_state=beep_state,
+                                correct_press_flags=correct_press_flags,
+                            )
 
-                # Frame
                 self.screen.fill((20, 22, 26))
                 self._draw_header()
-                # Stimulus drawing (visual shows image; audio draws nothing)
+                # show stimulus box + stimulus content
                 pygame.draw.rect(
                     self.screen, (60, 60, 65), self.stimulus_rect, border_radius=12
                 )
@@ -422,27 +460,52 @@ class BaseNBackGame(ABC):
                 )
                 for mod in self.modalities:
                     mod.draw_stimulus(self.screen, self.stimulus_rect)
-                self._draw_panels()
+                # Panels: fill only if answered (so you can see what you pressed)
+                self._draw_panels(fill_mode="answered")
                 self._draw_debug()
                 self._draw_scorebar()
                 pygame.display.flip()
                 self.clock.tick(120)
 
-            # ISI phase (blank; still capture input)
-            isi_t0 = pygame.time.get_ticks()
-            while pygame.time.get_ticks() - isi_t0 < self.isi_ms:
+            # Final correctness per modality (pressed == match)
+            final_correct = [
+                (m.answered == m.gt_is_match_nback) for m in self.modalities
+            ]
+            newly_correct = [
+                fc and not correct_press_flags[i] for i, fc in enumerate(final_correct)
+            ]
+            num_correct_total = sum(1 for fc in final_correct if fc)
+            num_new_correct = sum(1 for nc in newly_correct if nc)
+
+            # 2) FEEDBACK (no input; show stimulus; color panels by final correctness)
+            # Beep upgrade logic (reward correct abstentions)
+            if not beep_state["full"]:
+                if beep_state["half"]:
+                    # We had a half-beep during Stimulus; if some new correctness now, give a full-beep once
+                    if num_new_correct >= 1:
+                        self.beep_double.play()
+                        beep_state["full"] = True
+                else:
+                    # No beep yet: decide based on total correctness
+                    if num_correct_total >= 2:
+                        self.beep_double.play()
+                        beep_state["full"] = True
+                    elif num_correct_total == 1:
+                        self.beep_half.play()
+                        beep_state["half"] = True
+
+            fb_t0 = pygame.time.get_ticks()
+            while pygame.time.get_ticks() - fb_t0 < self.feedback_ms:
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT:
                         running = False
-                    elif event.type == pygame.KEYDOWN:
-                        if event.key == pygame.K_ESCAPE:
-                            running = False
-                        else:
-                            self._handle_keydown(event.key)
+                    elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                        running = False
+                    # NOTE: ignore all other keys in feedback period
 
                 self.screen.fill((20, 22, 26))
                 self._draw_header()
-                # Blank stimulus box
+                # show SAME stimulus during feedback
                 pygame.draw.rect(
                     self.screen, (60, 60, 65), self.stimulus_rect, border_radius=12
                 )
@@ -453,17 +516,47 @@ class BaseNBackGame(ABC):
                     width=2,
                     border_radius=12,
                 )
-                self._draw_panels()
+                for mod in self.modalities:
+                    mod.draw_stimulus(self.screen, self.stimulus_rect)
+                # Panels: fill by FINAL correctness (so abstentions can be green/red)
+                self._draw_panels(fill_mode="final")
                 self._draw_debug()
                 self._draw_scorebar()
                 pygame.display.flip()
                 self.clock.tick(120)
 
-            # Score each modality: pressed == n-back-match
+            # 3) ISI (blank; no input)
+            isi_t0 = pygame.time.get_ticks()
+            while pygame.time.get_ticks() - isi_t0 < self.isi_ms:
+                for event in pygame.event.get():
+                    if event.type == pygame.QUIT:
+                        running = False
+                    elif event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE:
+                        running = False
+                    # ignore any other keys in ISI
+
+                self.screen.fill((20, 22, 26))
+                self._draw_header()
+                pygame.draw.rect(
+                    self.screen, (60, 60, 65), self.stimulus_rect, border_radius=12
+                )
+                pygame.draw.rect(
+                    self.screen,
+                    (160, 160, 170),
+                    self.stimulus_rect,
+                    width=2,
+                    border_radius=12,
+                )
+                # (blank stimulus area)
+                self._draw_panels(fill_mode="final")
+                self._draw_debug()
+                self._draw_scorebar()
+                pygame.display.flip()
+                self.clock.tick(120)
+
+            # Score each modality
             for i, mod in enumerate(self.modalities):
-                pressed = mod.answered
-                correct = pressed == mod.gt_is_match_nback
-                if correct:
+                if final_correct[i]:
                     self.correct_counts[i] += 1
 
             self.t += 1
@@ -524,7 +617,7 @@ class VisualNBackGame(BaseNBackGame):
     def layout_ui(self, window_size: tuple[int, int]) -> tuple[Rect, list[Rect]]:
         W, H = window_size
         stim = Rect(W // 2 - 220, 100, 440, 440)  # centered larger image
-        panel = Rect(W // 2 - 160, stim.bottom + 20, 320, 90)
+        panel = Rect(W // 2 - 160, stim.bottom + 20, 320, 100)
         return stim, [panel]
 
     def window_title(self) -> str:
@@ -551,7 +644,7 @@ class AudioNBackGame(BaseNBackGame):
         stim = Rect(
             W // 2 - 200, 140, 400, 220
         )  # placeholder box (audio has no visual)
-        panel = Rect(W // 2 - 160, stim.bottom + 40, 320, 90)
+        panel = Rect(W // 2 - 160, stim.bottom + 40, 320, 100)
         return stim, [panel]
 
     def window_title(self) -> str:
