@@ -785,8 +785,8 @@ class EmotionalDualNBack(BaseNBackGame):
 
 
 class VisualSentimentNBackGame(BaseNBackGame):
-    def __init__(self, *, window_size=(900, 650), **kwargs):
-        self._kdef = KDEFSentimentLoader()
+    def __init__(self, *, window_size=(900, 650), binary: bool = False, **kwargs):
+        self._kdef = KDEFSentimentLoader(binary=binary)
         super().__init__(window_size=window_size, **kwargs)
 
     def build_modalities(self) -> list[Modality]:
@@ -809,8 +809,8 @@ class VisualSentimentNBackGame(BaseNBackGame):
 
 
 class AudioSentimentNBackGame(BaseNBackGame):
-    def __init__(self, *, window_size=(900, 650), **kwargs):
-        self._mav = MAVSentimentLoader()
+    def __init__(self, *, window_size=(900, 650), binary: bool = False, **kwargs):
+        self._mav = MAVSentimentLoader(binary=binary)
         super().__init__(window_size=window_size, **kwargs)
 
     def build_modalities(self) -> list[Modality]:
@@ -833,9 +833,9 @@ class AudioSentimentNBackGame(BaseNBackGame):
 
 
 class SentimentDualNBack(BaseNBackGame):
-    def __init__(self, *, window_size=(1000, 650), **kwargs):
-        self._kdef = KDEFSentimentLoader()
-        self._mav = MAVSentimentLoader()
+    def __init__(self, *, window_size=(1000, 650), binary: bool = False, **kwargs):
+        self._kdef = KDEFSentimentLoader(binary=binary)
+        self._mav = MAVSentimentLoader(binary=binary)
         super().__init__(window_size=window_size, **kwargs)
 
     def build_modalities(self) -> list[Modality]:

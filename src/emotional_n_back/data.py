@@ -117,8 +117,11 @@ class KDEFSentimentLoader:
         "negative": ["angry", "sad", "fear", "disgust"],
     }
 
-    def __init__(self):
-        self.sentiments = list(self.KDEF_SENTIMENT_MAP.keys())
+    def __init__(self, binary: bool = False):
+        self.sentiment_map = self.KDEF_SENTIMENT_MAP.copy()
+        if binary:
+            del self.sentiment_map["neutral"]
+        self.sentiments = list(self.sentiment_map.keys())
         self.enumerated_sentiments: dict[int, str] = {
             i: s for i, s in enumerate(self.sentiments)
         }
@@ -128,10 +131,10 @@ class KDEFSentimentLoader:
         """
         Get the list of image paths for a given sentiment.
         """
-        if sentiment not in self.KDEF_SENTIMENT_MAP:
+        if sentiment not in self.sentiment_map:
             raise ValueError(f"Sentiment {sentiment} is not recognized.")
 
-        emotions = self.KDEF_SENTIMENT_MAP[sentiment]
+        emotions = self.sentiment_map[sentiment]
         images = []
         for emotion in emotions:
             images.extend(self._kdef_loader.get_images_for_emotion(emotion))
@@ -170,8 +173,11 @@ class MAVSentimentLoader:
         "negative": ["anger", "disgust", "fear", "pain"],
     }
 
-    def __init__(self):
-        self.sentiments = list(self.MAV_SENTIMENT_MAP.keys())
+    def __init__(self, binary: bool = False):
+        self.sentiment_map = self.MAV_SENTIMENT_MAP.copy()
+        if binary:
+            del self.sentiment_map["neutral"]
+        self.sentiments = list(self.sentiment_map.keys())
         self.enumerated_sentiments: dict[int, str] = {
             i: s for i, s in enumerate(self.sentiments)
         }
@@ -181,10 +187,10 @@ class MAVSentimentLoader:
         """
         Get the list of audio file paths for a given sentiment.
         """
-        if sentiment not in self.MAV_SENTIMENT_MAP:
+        if sentiment not in self.sentiment_map:
             raise ValueError(f"Sentiment {sentiment} is not recognized.")
 
-        emotions = self.MAV_SENTIMENT_MAP[sentiment]
+        emotions = self.sentiment_map[sentiment]
         audio_files = []
         for emotion in emotions:
             audio_files.extend(self._mav_loader.get_audio_for_emotion(emotion))

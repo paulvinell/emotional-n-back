@@ -104,6 +104,7 @@ def visual_sentiment(
     stim_ms: int = 2000,
     seed: int | None = None,
     help_labels: bool = False,
+    binary: bool = False,
 ):
     game = VisualSentimentNBackGame(
         length=length,
@@ -114,6 +115,7 @@ def visual_sentiment(
         isi_ms=500,
         show_debug_labels=False,
         show_help_labels=help_labels,
+        binary=binary,
     )
     game.run()
 
@@ -125,6 +127,7 @@ def audio_sentiment(
     stim_ms: int = 2000,
     seed: int | None = None,
     help_labels: bool = False,
+    binary: bool = False,
 ):
     game = AudioSentimentNBackGame(
         length=length,
@@ -135,6 +138,7 @@ def audio_sentiment(
         isi_ms=500,
         show_debug_labels=False,
         show_help_labels=help_labels,
+        binary=binary,
     )
     game.run()
 
@@ -146,6 +150,7 @@ def dual_sentiment(
     stim_ms: int = 2000,
     seed: int | None = None,
     help_labels: bool = False,
+    binary: bool = False,
 ):
     game = SentimentDualNBack(
         length=length,
@@ -156,6 +161,7 @@ def dual_sentiment(
         isi_ms=500,
         show_debug_labels=False,
         show_help_labels=help_labels,
+        binary=binary,
     )
     game.run()
 
