@@ -7,7 +7,12 @@ import numpy as np
 import pygame
 from pygame import Rect
 
-from emotional_n_back.data import KDEFLoader, MAVLoader
+from emotional_n_back.data import (
+    KDEFLoader,
+    MAVLoader,
+    KDEFSentimentLoader,
+    MAVSentimentLoader,
+)
 from emotional_n_back.nback import NBackSequence
 
 
@@ -166,7 +171,7 @@ class Modality(ABC):
 
 
 # -------------------- Visual Modality --------------------
-class VisualModality(Modality):
+class VisualEmotionModality(Modality):
     def __init__(self, kdef: KDEFLoader, trigger_key: int):
         super().__init__("Image", trigger_key)
         self.kdef = kdef
@@ -218,7 +223,7 @@ class VisualModality(Modality):
 
 
 # -------------------- Audio Modality --------------------
-class AudioModality(Modality):
+class AudioEmotionModality(Modality):
     def __init__(self, mav: MAVLoader, trigger_key: int):
         super().__init__("Audio", trigger_key)
         self.mav = mav
@@ -253,6 +258,98 @@ class AudioModality(Modality):
     def current_debug(self) -> dict[str, str]:
         return {
             "emotion": self.current_emotion_name or "",
+            "seq_same_as_prev": "Yes" if self.truth_prev else "No",
+        }
+
+
+# -------------------- Visual Sentiment Modality --------------------
+class VisualSentimentModality(Modality):
+    def __init__(self, kdef: KDEFSentimentLoader, trigger_key: int):
+        super().__init__("Image", trigger_key)
+        self.kdef = kdef
+        self.current_sentiment_name: Optional[str] = None
+        self.current_image_surface: Optional[pygame.Surface] = None
+        self._img_cache: dict[str, pygame.Surface] = {}
+        self._current_image_path: Optional[str] = None
+
+    def _load_fit(self, path: str, box: Rect) -> pygame.Surface:
+        if path in self._img_cache:
+            return self._img_cache[path]
+        img = pygame.image.load(path).convert_alpha()
+        iw, ih = img.get_width(), img.get_height()
+        scale = min(box.w / iw, box.h / ih)
+        surf = pygame.transform.smoothscale(img, (int(iw * scale), int(ih * scale)))
+        self._img_cache[path] = surf
+        return surf
+
+    def next_stimulus(self, idx_value: int) -> None:
+        self.current_sentiment_name = self.kdef.get_sentiment(idx_value - 1)
+        img_path = self.kdef.get_random_image(self.current_sentiment_name)
+        self._current_image_path = str(img_path)
+        self.current_image_surface = None
+
+    def play_stimulus(self) -> None:
+        pass
+
+    def draw_stimulus(self, screen: pygame.Surface, rect: Rect) -> None:
+        if self._current_image_path is None:
+            return
+        if self.current_image_surface is None:
+            self.current_image_surface = self._load_fit(self._current_image_path, rect)
+        if self.current_image_surface:
+            dst = self.current_image_surface.get_rect(center=rect.center)
+            screen.blit(self.current_image_surface, dst)
+
+    def build_subtitle(self) -> Optional[str]:
+        return (
+            f"This was: {self.current_sentiment_name}"
+            if self.current_sentiment_name
+            else None
+        )
+
+    def current_debug(self) -> dict[str, str]:
+        return {
+            "sentiment": self.current_sentiment_name or "",
+            "seq_same_as_prev": "Yes" if self.truth_prev else "No",
+        }
+
+
+# -------------------- Audio Sentiment Modality --------------------
+class AudioSentimentModality(Modality):
+    def __init__(self, mav: MAVSentimentLoader, trigger_key: int):
+        super().__init__("Audio", trigger_key)
+        self.mav = mav
+        self.current_sentiment_name: Optional[str] = None
+        self.current_sound: Optional[pygame.mixer.Sound] = None
+        self._current_audio_path: Optional[str] = None
+
+    def next_stimulus(self, idx_value: int) -> None:
+        self.current_sentiment_name = self.mav.get_sentiment(idx_value - 1)
+        aud_path = self.mav.get_random_audio(self.current_sentiment_name)
+        try:
+            self.current_sound = pygame.mixer.Sound(str(aud_path))
+        except Exception:
+            self.current_sound = None
+        self._current_audio_path = str(aud_path)
+
+    def play_stimulus(self) -> None:
+        if self.current_sound:
+            self.current_sound.play()
+
+    def draw_stimulus(self, screen: pygame.Surface, rect: Rect) -> None:
+        # No visual for audio; keep stimulus box visible.
+        pass
+
+    def build_subtitle(self) -> Optional[str]:
+        return (
+            f"This was: {self.current_sentiment_name}"
+            if self.current_sentiment_name
+            else None
+        )
+
+    def current_debug(self) -> dict[str, str]:
+        return {
+            "sentiment": self.current_sentiment_name or "",
             "seq_same_as_prev": "Yes" if self.truth_prev else "No",
         }
 
@@ -609,7 +706,7 @@ class VisualNBackGame(BaseNBackGame):
 
     def build_modalities(self) -> list[Modality]:
         # Single mode uses key "1"
-        return [VisualModality(self._kdef, pygame.K_1)]
+        return [VisualEmotionModality(self._kdef, pygame.K_1)]
 
     def distinct_items_for(self, modality: Modality) -> int:
         return len(self._kdef.emotions)
@@ -634,7 +731,7 @@ class AudioNBackGame(BaseNBackGame):
 
     def build_modalities(self) -> list[Modality]:
         # Single mode uses key "1"
-        return [AudioModality(self._mav, pygame.K_1)]
+        return [AudioEmotionModality(self._mav, pygame.K_1)]
 
     def distinct_items_for(self, modality: Modality) -> int:
         return len(self._mav.emotions)
@@ -663,12 +760,12 @@ class EmotionalDualNBack(BaseNBackGame):
     def build_modalities(self) -> list[Modality]:
         # Dual mode: 1 -> Image, 2 -> Audio
         return [
-            VisualModality(self._kdef, pygame.K_1),
-            AudioModality(self._mav, pygame.K_2),
+            VisualEmotionModality(self._kdef, pygame.K_1),
+            AudioEmotionModality(self._mav, pygame.K_2),
         ]
 
     def distinct_items_for(self, modality: Modality) -> int:
-        if isinstance(modality, VisualModality):
+        if isinstance(modality, VisualEmotionModality):
             return len(self._kdef.emotions)
         return len(self._mav.emotions)
 
@@ -682,6 +779,86 @@ class EmotionalDualNBack(BaseNBackGame):
 
     def window_title(self) -> str:
         return "Emotional Dual N-Back"
+
+    def help_text(self) -> str:
+        return "Press 1 for Image match, 2 for Audio match (independent)."
+
+
+class VisualSentimentNBackGame(BaseNBackGame):
+    def __init__(self, *, window_size=(900, 650), **kwargs):
+        self._kdef = KDEFSentimentLoader()
+        super().__init__(window_size=window_size, **kwargs)
+
+    def build_modalities(self) -> list[Modality]:
+        return [VisualSentimentModality(self._kdef, pygame.K_1)]
+
+    def distinct_items_for(self, modality: Modality) -> int:
+        return len(self._kdef.sentiments)
+
+    def layout_ui(self, window_size: tuple[int, int]) -> tuple[Rect, list[Rect]]:
+        W, H = window_size
+        stim = Rect(W // 2 - 220, 100, 440, 440)
+        panel = Rect(W // 2 - 160, stim.bottom + 20, 320, 100)
+        return stim, [panel]
+
+    def window_title(self) -> str:
+        return "Sentiment N-Back — Visual Only"
+
+    def help_text(self) -> str:
+        return "Press 1 for Image match (n-back)."
+
+
+class AudioSentimentNBackGame(BaseNBackGame):
+    def __init__(self, *, window_size=(900, 650), **kwargs):
+        self._mav = MAVSentimentLoader()
+        super().__init__(window_size=window_size, **kwargs)
+
+    def build_modalities(self) -> list[Modality]:
+        return [AudioSentimentModality(self._mav, pygame.K_1)]
+
+    def distinct_items_for(self, modality: Modality) -> int:
+        return len(self._mav.sentiments)
+
+    def layout_ui(self, window_size: tuple[int, int]) -> tuple[Rect, list[Rect]]:
+        W, H = window_size
+        stim = Rect(W // 2 - 200, 140, 400, 220)
+        panel = Rect(W // 2 - 160, stim.bottom + 40, 320, 100)
+        return stim, [panel]
+
+    def window_title(self) -> str:
+        return "Sentiment N-Back — Audio Only"
+
+    def help_text(self) -> str:
+        return "Press 1 for Audio match (n-back)."
+
+
+class SentimentDualNBack(BaseNBackGame):
+    def __init__(self, *, window_size=(1000, 650), **kwargs):
+        self._kdef = KDEFSentimentLoader()
+        self._mav = MAVSentimentLoader()
+        super().__init__(window_size=window_size, **kwargs)
+
+    def build_modalities(self) -> list[Modality]:
+        return [
+            VisualSentimentModality(self._kdef, pygame.K_1),
+            AudioSentimentModality(self._mav, pygame.K_2),
+        ]
+
+    def distinct_items_for(self, modality: Modality) -> int:
+        if isinstance(modality, VisualSentimentModality):
+            return len(self._kdef.sentiments)
+        return len(self._mav.sentiments)
+
+    def layout_ui(self, window_size: tuple[int, int]) -> tuple[Rect, list[Rect]]:
+        W, H = window_size
+        stim = Rect(80, 100, 420, 420)
+        right_x = stim.right + 40
+        panel_img = Rect(right_x, 140, 360, 100)
+        panel_aud = Rect(right_x, 260, 360, 100)
+        return stim, [panel_img, panel_aud]
+
+    def window_title(self) -> str:
+        return "Sentiment Dual N-Back"
 
     def help_text(self) -> str:
         return "Press 1 for Image match, 2 for Audio match (independent)."

@@ -4,7 +4,14 @@ import shutil
 import typer
 
 from emotional_n_back.constants import DATA_DIR
-from emotional_n_back.game import AudioNBackGame, EmotionalDualNBack, VisualNBackGame
+from emotional_n_back.game import (
+    AudioNBackGame,
+    EmotionalDualNBack,
+    VisualNBackGame,
+    VisualSentimentNBackGame,
+    AudioSentimentNBackGame,
+    SentimentDualNBack,
+)
 from emotional_n_back.nback import DualNBackTerminal
 
 app = typer.Typer()
@@ -85,6 +92,69 @@ def audio(
         stim_ms=stim_ms,
         isi_ms=500,
         show_debug_labels=False,  # set True to display current emotions + GT
+        show_help_labels=help_labels,
+    )
+    game.run()
+
+
+@app.command()
+def visual_sentiment(
+    length: int = 20,
+    n: int = 2,
+    stim_ms: int = 2000,
+    seed: int | None = None,
+    help_labels: bool = False,
+):
+    game = VisualSentimentNBackGame(
+        length=length,
+        n=n,
+        repeat_probability=0.5,
+        seed=seed,
+        stim_ms=stim_ms,
+        isi_ms=500,
+        show_debug_labels=False,
+        show_help_labels=help_labels,
+    )
+    game.run()
+
+
+@app.command()
+def audio_sentiment(
+    length: int = 20,
+    n: int = 2,
+    stim_ms: int = 2000,
+    seed: int | None = None,
+    help_labels: bool = False,
+):
+    game = AudioSentimentNBackGame(
+        length=length,
+        n=n,
+        repeat_probability=0.5,
+        seed=seed,
+        stim_ms=stim_ms,
+        isi_ms=500,
+        show_debug_labels=False,
+        show_help_labels=help_labels,
+    )
+    game.run()
+
+
+@app.command()
+def dual_sentiment(
+    length: int = 20,
+    n: int = 2,
+    stim_ms: int = 2000,
+    seed: int | None = None,
+    help_labels: bool = False,
+):
+    game = SentimentDualNBack(
+        length=length,
+        n=n,
+        repeat_probability=0.35,
+        seed=seed,
+        stim_ms=stim_ms,
+        isi_ms=500,
+        show_debug_labels=False,
         show_help_labels=help_labels,
     )
     game.run()
