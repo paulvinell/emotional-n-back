@@ -241,6 +241,14 @@ def tess():
     for item in tess_src_subfolder.iterdir():
         shutil.move(str(item), tess_dst / item.name)
 
+    # Rename dir OAF_Pleasant_surprise to OAF_pleasant_surprise
+    # Rename dir YAF_pleasant_surprised to YAF_pleasant_surprise
+    for item in tess_dst.iterdir():
+        if item.name == "OAF_Pleasant_surprise":
+            item.rename(tess_dst / "OAF_pleasant_surprise")
+        elif item.name == "YAF_pleasant_surprised":
+            item.rename(tess_dst / "YAF_pleasant_surprise")
+
     # Clean up Kaggle datasets directory
     if kaggle_datasets_dir.exists():
         shutil.rmtree(kaggle_datasets_dir)
