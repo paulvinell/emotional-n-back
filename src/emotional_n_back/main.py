@@ -6,11 +6,11 @@ import typer
 from emotional_n_back.constants import DATA_DIR
 from emotional_n_back.game import (
     AudioNBackGame,
+    AudioSentimentNBackGame,
     EmotionalDualNBack,
+    SentimentDualNBack,
     VisualNBackGame,
     VisualSentimentNBackGame,
-    AudioSentimentNBackGame,
-    SentimentDualNBack,
 )
 from emotional_n_back.nback import DualNBackTerminal
 
@@ -205,6 +205,42 @@ def kdef():
             if img_path.exists():
                 print(f"Removing {img_path}...")
                 img_path.unlink()
+    # Clean up Kaggle datasets directory
+    if kaggle_datasets_dir.exists():
+        shutil.rmtree(kaggle_datasets_dir)
+
+
+@app.command()
+def tess():
+    tess_dst = DATA_DIR / "tess"
+    if tess_dst.exists():
+        print(f"{tess_dst} already exists, deleting...")
+        shutil.rmtree(tess_dst)
+
+    import kagglehub
+
+    os.environ["DISABLE_COLAB_CACHE"] = "true"
+    os.environ["KAGGLEHUB_CACHE"] = str(DATA_DIR)
+    kagglehub.dataset_download(
+        "ejlok1/toronto-emotional-speech-set-tess", force_download=True
+    )
+
+    kaggle_datasets_dir = DATA_DIR / "datasets"
+    src_dir = kaggle_datasets_dir / "ejlok1" / "toronto-emotional-speech-set-tess"
+    versions = list(src_dir.glob("versions/*"))
+    assert len(versions) == 1, "Expected exactly one version of the TESS dataset"
+
+    tess_src = versions[0] / "TESS Toronto emotional speech set data"
+    if tess_dst.exists():
+        if any(tess_dst.iterdir()):
+            raise FileExistsError(f"{tess_dst} already exists and is not empty")
+    else:
+        tess_dst.mkdir(parents=True)
+
+    tess_src_subfolder = tess_src / "TESS Toronto emotional speech set data"
+    for item in tess_src_subfolder.iterdir():
+        shutil.move(str(item), tess_dst / item.name)
+
     # Clean up Kaggle datasets directory
     if kaggle_datasets_dir.exists():
         shutil.rmtree(kaggle_datasets_dir)
