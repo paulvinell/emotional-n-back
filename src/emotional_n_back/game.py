@@ -354,6 +354,102 @@ class AudioSentimentModality(Modality):
         }
 
 
+# -------------------- Visual Position Modality --------------------
+class VisualPositionModality(Modality):
+    def __init__(self, kdef: KDEFSentimentLoader, trigger_key: int):
+        super().__init__("Position", trigger_key)
+        self.kdef = kdef
+        self.current_position: Optional[int] = None  # 1-9
+        self.current_image_surface: Optional[pygame.Surface] = None
+        self._img_cache: dict[str, pygame.Surface] = {}
+        self._current_image_path: Optional[str] = None
+        self.grid_rects: list[Rect] = []
+
+    def _load_fit(self, path: str, box: Rect) -> pygame.Surface:
+        if path in self._img_cache:
+            return self._img_cache[path]
+        img = pygame.image.load(path).convert_alpha()
+        iw, ih = img.get_width(), img.get_height()
+        scale = min(box.w / iw, box.h / ih)
+        surf = pygame.transform.smoothscale(img, (int(iw * scale), int(ih * scale)))
+        self._img_cache[path] = surf
+        return surf
+
+    def next_stimulus(self, idx_value: int) -> None:
+        self.current_position = idx_value
+        # Face sentiment is a distractor, so pick a random one
+        random_sentiment = random.choice(self.kdef.sentiments)
+        img_path = self.kdef.get_random_image(random_sentiment)
+        self._current_image_path = str(img_path)
+        self.current_image_surface = None
+
+    def play_stimulus(self) -> None:
+        pass
+
+    def draw_stimulus(self, screen: pygame.Surface, rect: Rect) -> None:
+        # Calculate grid rects if not already done for this size
+        if not self.grid_rects or self.grid_rects[0].w != rect.w / 3:
+            self.grid_rects = []
+            cell_w, cell_h = rect.w / 3, rect.h / 3
+            for i in range(9):
+                row, col = i // 3, i % 3
+                self.grid_rects.append(
+                    Rect(
+                        rect.x + col * cell_w,
+                        rect.y + row * cell_h,
+                        cell_w,
+                        cell_h,
+                    )
+                )
+
+        # Draw grid lines
+        for i in range(1, 3):
+            # Vertical
+            pygame.draw.line(
+                screen,
+                (100, 100, 105),
+                (rect.x + i * rect.w / 3, rect.y),
+                (rect.x + i * rect.w / 3, rect.bottom),
+                2,
+            )
+            # Horizontal
+            pygame.draw.line(
+                screen,
+                (100, 100, 105),
+                (rect.x, rect.y + i * rect.h / 3),
+                (rect.right, rect.y + i * rect.h / 3),
+                2,
+            )
+
+        if self._current_image_path is None or self.current_position is None:
+            return
+
+        cell_rect = self.grid_rects[self.current_position - 1]
+        padded_cell = cell_rect.inflate(-10, -10)
+
+        if self.current_image_surface is None:
+            self.current_image_surface = self._load_fit(
+                self._current_image_path, padded_cell
+            )
+
+        if self.current_image_surface:
+            dst = self.current_image_surface.get_rect(center=cell_rect.center)
+            screen.blit(self.current_image_surface, dst)
+
+    def build_subtitle(self) -> Optional[str]:
+        return (
+            f"This was: Position {self.current_position}"
+            if self.current_position
+            else None
+        )
+
+    def current_debug(self) -> dict[str, str]:
+        return {
+            "position": str(self.current_position) if self.current_position else "",
+            "seq_same_as_prev": "Yes" if self.truth_prev else "No",
+        }
+
+
 # -------------------- Base Game --------------------
 class BaseNBackGame(ABC):
     """
@@ -862,3 +958,35 @@ class SentimentDualNBack(BaseNBackGame):
 
     def help_text(self) -> str:
         return "Press 1 for Image match, 2 for Audio match (independent)."
+
+
+class AudioSentimentVisualPositionDualNBack(BaseNBackGame):
+    def __init__(self, *, window_size=(1000, 650), binary: bool = False, **kwargs):
+        self._kdef = KDEFSentimentLoader(binary=binary)
+        self._mav = MAVSentimentLoader(binary=binary)
+        super().__init__(window_size=window_size, **kwargs)
+
+    def build_modalities(self) -> list[Modality]:
+        return [
+            VisualPositionModality(self._kdef, pygame.K_1),
+            AudioSentimentModality(self._mav, pygame.K_2),
+        ]
+
+    def distinct_items_for(self, modality: Modality) -> int:
+        if isinstance(modality, VisualPositionModality):
+            return 9  # 3x3 grid
+        return len(self._mav.sentiments)
+
+    def layout_ui(self, window_size: tuple[int, int]) -> tuple[Rect, list[Rect]]:
+        W, H = window_size
+        stim = Rect(80, 100, 420, 420)
+        right_x = stim.right + 40
+        panel_pos = Rect(right_x, 140, 360, 100)
+        panel_aud = Rect(right_x, 260, 360, 100)
+        return stim, [panel_pos, panel_aud]
+
+    def window_title(self) -> str:
+        return "Dual N-Back: Audio Sentiment & Visual Position"
+
+    def help_text(self) -> str:
+        return "Press 1 for Position match, 2 for Audio match (independent)."

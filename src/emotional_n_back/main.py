@@ -7,6 +7,7 @@ from emotional_n_back.constants import DATA_DIR
 from emotional_n_back.game import (
     AudioNBackGame,
     AudioSentimentNBackGame,
+    AudioSentimentVisualPositionDualNBack,
     EmotionalDualNBack,
     SentimentDualNBack,
     VisualNBackGame,
@@ -154,6 +155,29 @@ def dual_sentiment(
     binary: bool = False,
 ):
     game = SentimentDualNBack(
+        length=length,
+        n=n,
+        repeat_probability=0.35,
+        seed=seed,
+        stim_ms=stim_ms,
+        isi_ms=500,
+        show_debug_labels=False,
+        show_help_labels=help_labels,
+        binary=binary,
+    )
+    game.run()
+
+
+@app.command()
+def dual_position_sentiment(
+    length: int = 20,
+    n: int = 2,
+    stim_ms: int = 2000,
+    seed: int | None = None,
+    help_labels: bool = False,
+    binary: bool = False,
+):
+    game = AudioSentimentVisualPositionDualNBack(
         length=length,
         n=n,
         repeat_probability=0.35,
