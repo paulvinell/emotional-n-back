@@ -13,6 +13,7 @@ from emotional_n_back.game import (
     VisualSentimentNBackGame,
 )
 from emotional_n_back.nback import DualNBackTerminal
+from emotional_n_back.stroop import SentimentStroopGame
 
 app = typer.Typer()
 
@@ -162,6 +163,22 @@ def dual_sentiment(
         show_debug_labels=False,
         show_help_labels=help_labels,
         binary=binary,
+    )
+    game.run()
+
+
+@app.command()
+def stroop(
+    length: int = 30,
+    seed: int | None = None,
+    visual_intro_ms: int = 500,
+    response_window_ms: int = 2000,
+):
+    game = SentimentStroopGame(
+        length=length,
+        seed=seed,
+        visual_intro_ms=visual_intro_ms,
+        response_window_ms=response_window_ms,
     )
     game.run()
 
