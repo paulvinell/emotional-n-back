@@ -14,7 +14,7 @@ from emotional_n_back.game import (
     VisualSentimentNBackGame,
 )
 from emotional_n_back.nback import DualNBackTerminal
-from emotional_n_back.stroop import SentimentStroopGame
+from emotional_n_back.stroop import AlternatingStroopGame, SentimentStroopGame
 
 app = typer.Typer()
 
@@ -202,6 +202,22 @@ def stroop(
         length=length,
         seed=seed,
         visual_intro_ms=visual_intro_ms,
+        response_window_ms=response_window_ms,
+    )
+    game.run()
+
+
+@app.command()
+def alternating_stroop(
+    length: int = 30,
+    seed: int | None = None,
+    intro_delay_ms: int = 500,
+    response_window_ms: int = 2000,
+):
+    game = AlternatingStroopGame(
+        length=length,
+        seed=seed,
+        intro_delay_ms=intro_delay_ms,
         response_window_ms=response_window_ms,
     )
     game.run()
