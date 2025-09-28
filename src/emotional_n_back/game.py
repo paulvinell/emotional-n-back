@@ -98,6 +98,10 @@ class Modality(ABC):
     def draw_stimulus(self, screen: pygame.Surface, rect: Rect) -> None:
         """Draw the main stimulus (visual draws image; audio draws nothing)."""
 
+    def draw_stimulus_background(self, screen: pygame.Surface, rect: Rect) -> None:
+        """Draw any persistent background for the stimulus, e.g. a grid."""
+        pass
+
     def try_answer(self) -> bool:
         """Register a single press; returns True iff first time for this trial."""
         if self.answered:
@@ -387,6 +391,24 @@ class VisualPositionModality(Modality):
         pass
 
     def draw_stimulus(self, screen: pygame.Surface, rect: Rect) -> None:
+        self.draw_stimulus_background(screen, rect)
+
+        if self._current_image_path is None or self.current_position is None:
+            return
+
+        cell_rect = self.grid_rects[self.current_position - 1]
+        padded_cell = cell_rect.inflate(-10, -10)
+
+        if self.current_image_surface is None:
+            self.current_image_surface = self._load_fit(
+                self._current_image_path, padded_cell
+            )
+
+        if self.current_image_surface:
+            dst = self.current_image_surface.get_rect(center=cell_rect.center)
+            screen.blit(self.current_image_surface, dst)
+
+    def draw_stimulus_background(self, screen: pygame.Surface, rect: Rect) -> None:
         # Calculate grid rects if not already done for this size
         if not self.grid_rects or self.grid_rects[0].w != rect.w / 3:
             self.grid_rects = []
@@ -420,21 +442,6 @@ class VisualPositionModality(Modality):
                 (rect.right, rect.y + i * rect.h / 3),
                 2,
             )
-
-        if self._current_image_path is None or self.current_position is None:
-            return
-
-        cell_rect = self.grid_rects[self.current_position - 1]
-        padded_cell = cell_rect.inflate(-10, -10)
-
-        if self.current_image_surface is None:
-            self.current_image_surface = self._load_fit(
-                self._current_image_path, padded_cell
-            )
-
-        if self.current_image_surface:
-            dst = self.current_image_surface.get_rect(center=cell_rect.center)
-            screen.blit(self.current_image_surface, dst)
 
     def build_subtitle(self) -> Optional[str]:
         return (
@@ -741,6 +748,8 @@ class BaseNBackGame(ABC):
                     border_radius=12,
                 )
                 # (blank stimulus area)
+                for mod in self.modalities:
+                    mod.draw_stimulus_background(self.screen, self.stimulus_rect)
                 self._draw_panels(fill_mode="final")
                 self._draw_debug()
                 self._draw_scorebar()
