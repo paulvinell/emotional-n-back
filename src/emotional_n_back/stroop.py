@@ -6,7 +6,10 @@ import numpy as np
 import pygame
 from pygame import Rect
 
-from emotional_n_back.data import KDEFSentimentLoader, MAVSentimentLoader
+from emotional_n_back.data import (
+    KDEFSentimentLoader,
+    MAVSentimentLoader,
+)
 
 
 def make_beep(

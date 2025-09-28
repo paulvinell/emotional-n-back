@@ -14,7 +14,11 @@ from emotional_n_back.game import (
     VisualSentimentNBackGame,
 )
 from emotional_n_back.nback import DualNBackTerminal
-from emotional_n_back.stroop import AlternatingStroopGame, SentimentStroopGame
+from emotional_n_back.stroop import (
+    AlternatingStroopGame,
+    SentimentStroopGame,
+)
+from emotional_n_back.speed_reading import SpeedReadingGame
 
 app = typer.Typer()
 
@@ -219,6 +223,29 @@ def alternating_stroop(
         seed=seed,
         intro_delay_ms=intro_delay_ms,
         response_window_ms=response_window_ms,
+    )
+    game.run()
+
+
+@app.command()
+def speed_reading(
+    lang: str = "en",
+    speed: int = 200,
+    audio_distraction_freq: float = 0.1,
+    visual_distraction_freq: float = 0.3,
+    visual_distraction_duration: int = 700,
+    seed: int | None = None,
+):
+    """
+    Run the speed reading game with distractions.
+    """
+    game = SpeedReadingGame(
+        language=lang,
+        scroll_speed=speed,
+        audio_distraction_freq=audio_distraction_freq,
+        visual_distraction_freq=visual_distraction_freq,
+        visual_distraction_duration_ms=visual_distraction_duration,
+        seed=seed,
     )
     game.run()
 

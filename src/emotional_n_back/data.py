@@ -1,7 +1,7 @@
 import random
 import re
 
-from emotional_n_back.constants import KDEF_DIR, MAV_DIR
+from emotional_n_back.constants import DATA_DIR, KDEF_DIR, MAV_DIR
 
 
 class KDEFLoader:
@@ -336,3 +336,33 @@ class TESSSentimentLoader:
         if index not in self.enumerated_sentiments:
             raise ValueError(f"Index {index} is out of range for sentiments.")
         return self.enumerated_sentiments[index]
+
+
+class TextLoader:
+    """
+    Loads text files from a given language directory and yields words indefinitely.
+    """
+
+    def __init__(self, language: str = "en"):
+        self.text_dir = DATA_DIR / "text" / language
+        if not self.text_dir.exists() or not self.text_dir.is_dir():
+            raise FileNotFoundError(
+                f"Text directory for language '{language}' not found at {self.text_dir}"
+            )
+        self.text_files = [
+            f for f in self.text_dir.iterdir() if f.is_file() and f.suffix == ".txt"
+        ]
+        if not self.text_files:
+            raise FileNotFoundError(f"No .txt files found in {self.text_dir}")
+
+    def word_generator(self):
+        """
+        A generator that yields words of text from random files indefinitely.
+        """
+        while True:
+            file_path = random.choice(self.text_files)
+            with open(file_path, "r", encoding="utf-8") as f:
+                content = f.read()
+            words = content.split()
+            for word in words:
+                yield word
