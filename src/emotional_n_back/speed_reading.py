@@ -45,6 +45,7 @@ class SpeedReadingGame:
         pygame.display.set_caption("Speed Reading Game")
         self.clock = pygame.time.Clock()
         self.font = pygame.font.SysFont(None, 60)
+        self.indicator_font = pygame.font.SysFont(None, 30)
 
         # Data Loaders
         self.text_loader = TextLoader(language=language)
@@ -95,6 +96,11 @@ class SpeedReadingGame:
                     event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
                 ):
                     running = False
+                if event.type == pygame.KEYDOWN:
+                    if event.key in (pygame.K_PLUS, pygame.K_KP_PLUS):
+                        self.scroll_speed += 25
+                    elif event.key in (pygame.K_MINUS, pygame.K_KP_MINUS):
+                        self.scroll_speed = max(25, self.scroll_speed - 25)
 
             # --- Update text scrolling ---
             self.text_x -= self.scroll_speed * delta_time_s
@@ -178,6 +184,13 @@ class SpeedReadingGame:
                     )
                 )
                 self.screen.blit(self.visual_distraction_surface, distraction_rect)
+
+            # Draw speed indicator
+            speed_text = f"Speed: {self.scroll_speed} (press +/- to change)"
+            speed_surface = self.indicator_font.render(speed_text, True, (200, 200, 200))
+            W, H = self.screen.get_size()
+            speed_rect = speed_surface.get_rect(bottomright=(W - 10, H - 10))
+            self.screen.blit(speed_surface, speed_rect)
 
             pygame.display.flip()
 
