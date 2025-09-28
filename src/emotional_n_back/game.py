@@ -1,7 +1,7 @@
 # nback_refactor.py
 import random
 from abc import ABC, abstractmethod
-from typing import Optional
+from typing import Optional, Union
 
 import numpy as np
 import pygame
@@ -9,8 +9,8 @@ from pygame import Rect
 
 from emotional_n_back.data import (
     KDEFLoader,
-    MAVLoader,
     KDEFSentimentLoader,
+    MAVLoader,
     MAVSentimentLoader,
 )
 from emotional_n_back.nback import NBackSequence
@@ -475,7 +475,7 @@ class BaseNBackGame(ABC):
         *,
         length: int = 30,
         n: int = 2,
-        repeat_probability: float = 0.25,
+        repeat_probability: Union[float, list[float]] = 0.25,
         seed: Optional[int] = None,
         stim_ms: int = 1000,
         feedback_ms: int = 500,
@@ -517,6 +517,15 @@ class BaseNBackGame(ABC):
             mod.panel_rect = rect
 
         # Sequences per modality, plus histories (for true n-back)
+        if isinstance(repeat_probability, float):
+            probs = [repeat_probability] * len(self.modalities)
+        else:
+            if len(repeat_probability) != len(self.modalities):
+                raise ValueError(
+                    "The number of repeat probabilities must match the number of modalities."
+                )
+            probs = repeat_probability
+
         self.seq_values: list[list[tuple[int, bool]]] = []
         self.histories: list[list[int]] = [[] for _ in self.modalities]
         for i, mod in enumerate(self.modalities):
@@ -524,7 +533,7 @@ class BaseNBackGame(ABC):
             seq_iter = NBackSequence(
                 self.length,
                 self.n,
-                repeat_probability=repeat_probability,
+                repeat_probability=probs[i],
                 distinct_items=distinct,
             )
             seq = [(v, t) for (v, t) in seq_iter]  # value + truth_prev from generator
@@ -970,9 +979,38 @@ class SentimentDualNBack(BaseNBackGame):
 
 
 class AudioSentimentVisualPositionDualNBack(BaseNBackGame):
-    def __init__(self, *, window_size=(1000, 650), binary: bool = False, **kwargs):
+    def __init__(
+        self,
+        *,
+        window_size=(1000, 650),
+        binary: bool = False,
+        visual_repeat_probability: Optional[float] = None,
+        audio_repeat_probability: Optional[float] = None,
+        **kwargs,
+    ):
         self._kdef = KDEFSentimentLoader(binary=binary)
         self._mav = MAVSentimentLoader(binary=binary)
+
+        if (
+            visual_repeat_probability is not None
+            and audio_repeat_probability is not None
+        ):
+            if "repeat_probability" in kwargs:
+                raise ValueError(
+                    "Cannot specify both repeat_probability and "
+                    "visual_repeat_probability/audio_repeat_probability"
+                )
+            # The order of modalities is Visual, then Audio.
+            repeat_probs = [visual_repeat_probability, audio_repeat_probability]
+            kwargs["repeat_probability"] = repeat_probs
+        elif (
+            visual_repeat_probability is not None
+            or audio_repeat_probability is not None
+        ):
+            raise ValueError(
+                "Must specify both or neither of visual/audio repeat probabilities."
+            )
+
         super().__init__(window_size=window_size, **kwargs)
 
     def build_modalities(self) -> list[Modality]:

@@ -14,11 +14,11 @@ from emotional_n_back.game import (
     VisualSentimentNBackGame,
 )
 from emotional_n_back.nback import DualNBackTerminal
+from emotional_n_back.speed_reading import SpeedReadingGame
 from emotional_n_back.stroop import (
     AlternatingStroopGame,
     SentimentStroopGame,
 )
-from emotional_n_back.speed_reading import SpeedReadingGame
 
 app = typer.Typer()
 
@@ -184,7 +184,7 @@ def dual_position_sentiment(
     game = AudioSentimentVisualPositionDualNBack(
         length=length,
         n=n,
-        repeat_probability=0.35,
+        repeat_probability=[0.25, 0.35],
         seed=seed,
         stim_ms=stim_ms,
         isi_ms=500,
