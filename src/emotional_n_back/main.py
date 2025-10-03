@@ -13,7 +13,6 @@ from emotional_n_back.game import (
     VisualNBackGame,
     VisualSentimentNBackGame,
 )
-from emotional_n_back.nback import DualNBackTerminal
 from emotional_n_back.speed_reading import SpeedReadingGame
 from emotional_n_back.stroop import (
     AlternatingStroopGame,
@@ -24,23 +23,6 @@ app = typer.Typer()
 
 
 @app.command()
-def main(name: str):
-    print(f"Hello {name}")
-
-
-@app.command()
-def cli():
-    DualNBackTerminal(
-        length=20,
-        n=2,
-        repeat_probability=0.3,
-        distinct_items=4,
-        seed=42,
-        show_truth=True,
-    ).play()
-
-
-@app.command()
 def dual(
     length: int = 20,
     n: int = 2,
@@ -48,6 +30,9 @@ def dual(
     seed: int | None = None,
     help_labels: bool = False,
 ):
+    """
+    Run an emotional dual n-back game with visual and audio stimuli.
+    """
     game = EmotionalDualNBack(
         length=length,
         n=n,
@@ -69,6 +54,9 @@ def visual(
     seed: int | None = None,
     help_labels: bool = False,
 ):
+    """
+    Run a visual n-back game.
+    """
     game = VisualNBackGame(
         length=length,
         n=n,
@@ -90,6 +78,9 @@ def audio(
     seed: int | None = None,
     help_labels: bool = False,
 ):
+    """
+    Run an audio n-back game.
+    """
     game = AudioNBackGame(
         length=length,
         n=n,
@@ -112,6 +103,9 @@ def visual_sentiment(
     help_labels: bool = False,
     binary: bool = False,
 ):
+    """
+    Run a visual n-back game with sentiment classification.
+    """
     game = VisualSentimentNBackGame(
         length=length,
         n=n,
@@ -135,6 +129,9 @@ def audio_sentiment(
     help_labels: bool = False,
     binary: bool = False,
 ):
+    """
+    Run an audio n-back game with sentiment classification.
+    """
     game = AudioSentimentNBackGame(
         length=length,
         n=n,
@@ -158,6 +155,9 @@ def dual_sentiment(
     help_labels: bool = False,
     binary: bool = False,
 ):
+    """
+    Run a dual n-back game with sentiment classification on both audio and visual streams.
+    """
     game = SentimentDualNBack(
         length=length,
         n=n,
@@ -181,6 +181,9 @@ def dual_position_sentiment(
     help_labels: bool = False,
     binary: bool = False,
 ):
+    """
+    Run a dual n-back game with audio sentiment and visual position.
+    """
     game = AudioSentimentVisualPositionDualNBack(
         length=length,
         n=n,
@@ -202,6 +205,9 @@ def stroop(
     visual_intro_ms: int = 500,
     response_window_ms: int = 2000,
 ):
+    """
+    Run a sentiment Stroop test.
+    """
     game = SentimentStroopGame(
         length=length,
         seed=seed,
@@ -218,6 +224,9 @@ def alternating_stroop(
     intro_delay_ms: int = 500,
     response_window_ms: int = 2000,
 ):
+    """
+    Run an alternating Stroop test.
+    """
     game = AlternatingStroopGame(
         length=length,
         seed=seed,
@@ -252,6 +261,9 @@ def speed_reading(
 
 @app.command()
 def kdef():
+    """
+    Download and prepare the KDEF dataset.
+    """
     kdef_dst = DATA_DIR / "kdef"
     if kdef_dst.exists():
         print(f"{kdef_dst} already exists, deleting...")
@@ -296,6 +308,9 @@ def kdef():
 
 @app.command()
 def tess():
+    """
+    Download and prepare the TESS dataset.
+    """
     tess_dst = DATA_DIR / "tess"
     if tess_dst.exists():
         print(f"{tess_dst} already exists, deleting...")
