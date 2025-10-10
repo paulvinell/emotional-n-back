@@ -42,15 +42,44 @@ def reader(ip: str = "127.0.0.1", port: int = 5005):
 
 @osc_app.command()
 def writer(
+    mode: str = typer.Argument("dummy", help="The streaming mode to use. Can be 'dummy' or 'eeg'."),
     ip: str = "127.0.0.1",
     port: int = 5005,
-    address: str = "/some/address",
+    address: str = None,
     message: str = "Hello OSC",
+    fs: int = 256,
+    duration: float = 20.0,
+    seed: int = 7,
+    rate_per_sec: float = 0.5,
+    dur_range: str = "0.2,0.8",
+    amp_range: str = "0.15,0.7",
 ):
     """OSC writer."""
-    client = udp_client.SimpleUDPClient(ip, port)
-    client.send_message(address, message)
-    print(f"Sent message '{message}' to {address} at {ip}:{port}")
+    if mode == "dummy":
+        from emotional_n_back.streaming.dummy import DummyStreamer
+        if address is None:
+            address = "/some/address"
+        streamer = DummyStreamer(ip=ip, port=port, address=address, message=message)
+    elif mode == "eeg":
+        from emotional_n_back.streaming.eeg import EEGStreamer
+        if address is None:
+            address = "/eeg"
+        streamer = EEGStreamer(
+            ip=ip,
+            port=port,
+            address=address,
+            fs=fs,
+            duration=duration,
+            seed=seed,
+            rate_per_sec=rate_per_sec,
+            dur_range=dur_range,
+            amp_range=amp_range,
+        )
+    else:
+        print(f"Unknown mode: {mode}")
+        raise typer.Exit(code=1)
+
+    streamer.stream()
 
 
 @app.command()
