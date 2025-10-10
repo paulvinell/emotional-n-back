@@ -19,6 +19,7 @@ from emotional_n_back.stroop import (
     AlternatingStroopGame,
     SentimentStroopGame,
 )
+from emotional_n_back.eeg_stroop import EEGStroopGame
 
 app = typer.Typer()
 osc_app = typer.Typer()
@@ -334,6 +335,25 @@ def alternating_stroop(
         length=length,
         seed=seed,
         intro_delay_ms=intro_delay_ms,
+        response_window_ms=response_window_ms,
+    )
+    game.run()
+
+
+@app.command()
+def eeg_stroop(
+    length: int = 30,
+    seed: int | None = None,
+    visual_intro_ms: int = 500,
+    response_window_ms: int = 2000,
+):
+    """
+    Run an EEG-integrated sentiment Stroop test.
+    """
+    game = EEGStroopGame(
+        length=length,
+        seed=seed,
+        visual_intro_ms=visual_intro_ms,
         response_window_ms=response_window_ms,
     )
     game.run()
