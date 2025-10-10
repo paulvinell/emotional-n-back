@@ -1,4 +1,6 @@
 import random
+import threading
+import time
 from enum import Enum, auto
 from typing import Optional
 
@@ -31,7 +33,11 @@ class EEGStroopGame(SentimentStroopGame):
     ):
         super().__init__(*args, **kwargs)
         self.p300_threshold = p300_threshold
-        self.last_erp_update = None
+        
+        # Thread-safe mechanism for ERP updates
+        self.erp_updates = {}
+        self.erp_lock = threading.Lock()
+
         self.erp_server = OscErpServer(
             host="127.0.0.1",
             port=5005,
@@ -43,31 +49,41 @@ class EEGStroopGame(SentimentStroopGame):
         self.beep_failure = make_beep(440, 200, 0.5)
 
     def _handle_erp_update(self, update: dict):
-        """Callback to receive ERP updates."""
-        # This is where you could add more complex logic, e.g. storing
-        # a history of ERPs for different conditions.
-        self.last_erp_update = update
+        """Callback to receive ERP updates in a thread-safe manner."""
+        with self.erp_lock:
+            self.erp_updates[update['code']] = update
 
-    def _get_reward(self) -> Reward:
+    def _get_reward(self, event_code: str) -> Reward:
         """
-        Determines the reward based on EEG data.
-        This is a placeholder for more sophisticated ERP analysis.
+        Determines the reward based on EEG data for a specific event.
+        Waits for a short period for the ERP result to become available.
         """
-        # TODO: Implement more sophisticated ERP analysis here.
-        # This is a simple example that rewards high P300 amplitude.
-        if self.last_erp_update is None:
+        # Wait for the ERP result for the specific event_code
+        update = None
+        wait_start_t = time.monotonic()
+        while time.monotonic() - wait_start_t < 1.0: # 1-second timeout
+            with self.erp_lock:
+                if event_code in self.erp_updates:
+                    update = self.erp_updates.pop(event_code) # Pop to avoid reuse
+                    break
+            time.sleep(0.01)
+
+        if update is None:
+            print(f"No ERP update received for event: {event_code}")
             return Reward.NONE
 
-        p300_amp = self.last_erp_update.get("components", {}).get("P300", {}).get("amp")
+        # TODO: Implement more sophisticated ERP analysis here.
+        # This is a simple example that rewards high P300 amplitude.
+        p300_amp = update.get("components", {}).get("P300", {}).get("amp")
 
         if p300_amp is None:
             return Reward.NONE
 
         if p300_amp > self.p300_threshold:
-            print(f"Success! P300 amp: {p300_amp:.2f} > {self.p300_threshold:.2f}")
+            print(f"Success! P300 amp for {event_code}: {p300_amp:.2f} > {self.p300_threshold:.2f}")
             return Reward.SUCCESS
         else:
-            print(f"Failure. P300 amp: {p300_amp:.2f} <= {self.p300_threshold:.2f}")
+            print(f"Failure. P300 amp for {event_code}: {p300_amp:.2f} <= {self.p300_threshold:.2f}")
             return Reward.FAILURE
 
     def run(self):
@@ -78,7 +94,8 @@ class EEGStroopGame(SentimentStroopGame):
             visual_sentiment = random.choice(self.sentiments)
             audio_sentiment = random.choice(self.sentiments)
             is_congruent = visual_sentiment == audio_sentiment
-            event_code = "congruent" if is_congruent else "incongruent"
+            # Create a unique event code for this trial
+            event_code = f"{'congruent' if is_congruent else 'incongruent'}_{self.trial_num}"
 
             image_path = self.kdef_loader.get_random_image(visual_sentiment)
             image_surface = self._load_fit_image(str(image_path), self.stimulus_rect)
@@ -113,7 +130,7 @@ class EEGStroopGame(SentimentStroopGame):
             print(f"Ingested event: {event_code}")
 
             response_t0 = pygame.time.get_ticks()
-            # Wait for the audio to finish playing before getting the reward
+            # Wait for the audio to finish playing
             while pygame.mixer.get_busy() and (
                 pygame.time.get_ticks() - response_t0 < self.response_window_ms
             ):
@@ -130,11 +147,8 @@ class EEGStroopGame(SentimentStroopGame):
                 break
 
             # --- 4. Reward Phase ---
-            # The reward is based on the last ERP update, which is handled
-            # by the on_update callback in a separate thread.
-            # We add a small delay to allow the ERP to be processed.
-            pygame.time.wait(500) # Wait for LPP to be captured
-            reward = self._get_reward()
+            # The reward is now fetched specifically for the event of this trial
+            reward = self._get_reward(event_code)
             if reward == Reward.SUCCESS:
                 self.beep_success.play()
                 self.score += 1
