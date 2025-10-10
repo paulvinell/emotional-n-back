@@ -26,18 +26,61 @@ app.add_typer(osc_app, name="osc")
 
 
 @osc_app.command()
-def reader(ip: str = "127.0.0.1", port: int = 5005):
+def reader(
+    ip: str = "127.0.0.1",
+    port: int = 5005,
+    visualize: bool = typer.Option(False, "--visualize", help="Visualize incoming EEG signal."),
+    buffer_size: int = 256 * 5, # 5 seconds of data at 256Hz
+):
     """OSC reader."""
+    import threading
+    from collections import deque
+    import numpy as np
 
-    def print_handler(address, *args):
-        print(f"Received message from {address}: {args}")
+    data_buffer = deque(maxlen=buffer_size)
+
+    def handler(address, *args):
+        if visualize:
+            # Assuming the first arg is the eeg signal
+            data_buffer.append(args[0])
+        else:
+            print(f"Received message from {address}: {args}")
 
     disp = dispatcher.Dispatcher()
-    disp.map("/*", print_handler)
+    disp.map("/*", handler)
 
     server = osc_server.ThreadingOSCUDPServer((ip, port), disp)
+    server_thread = threading.Thread(target=server.serve_forever)
+    server_thread.daemon = True
+    server_thread.start()
+
     print(f"Serving on {server.server_address}")
-    server.serve_forever()
+
+    if visualize:
+        import matplotlib.pyplot as plt
+        plt.ion()
+        fig, ax = plt.subplots()
+        line, = ax.plot(np.zeros(buffer_size))
+        ax.set_ylim(-3, 3)
+        ax.set_xlim(0, buffer_size)
+        plt.show()
+
+        while True:
+            try:
+                line.set_ydata(list(data_buffer) + [0] * (buffer_size - len(data_buffer)))
+                fig.canvas.draw()
+                fig.canvas.flush_events()
+                plt.pause(0.01)
+            except (KeyboardInterrupt, Exception):
+                break
+    else:
+        try:
+            while True:
+                pass
+        except KeyboardInterrupt:
+            pass
+
+    server.shutdown()
 
 
 @osc_app.command()
