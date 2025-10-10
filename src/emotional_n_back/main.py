@@ -2,6 +2,7 @@ import os
 import shutil
 
 import typer
+from pythonosc import dispatcher, osc_server, udp_client
 
 from emotional_n_back.constants import DATA_DIR
 from emotional_n_back.game import (
@@ -20,6 +21,36 @@ from emotional_n_back.stroop import (
 )
 
 app = typer.Typer()
+osc_app = typer.Typer()
+app.add_typer(osc_app, name="osc")
+
+
+@osc_app.command()
+def reader(ip: str = "127.0.0.1", port: int = 5005):
+    """OSC reader."""
+
+    def print_handler(address, *args):
+        print(f"Received message from {address}: {args}")
+
+    disp = dispatcher.Dispatcher()
+    disp.map("/*", print_handler)
+
+    server = osc_server.ThreadingOSCUDPServer((ip, port), disp)
+    print(f"Serving on {server.server_address}")
+    server.serve_forever()
+
+
+@osc_app.command()
+def writer(
+    ip: str = "127.0.0.1",
+    port: int = 5005,
+    address: str = "/some/address",
+    message: str = "Hello OSC",
+):
+    """OSC writer."""
+    client = udp_client.SimpleUDPClient(ip, port)
+    client.send_message(address, message)
+    print(f"Sent message '{message}' to {address} at {ip}:{port}")
 
 
 @app.command()

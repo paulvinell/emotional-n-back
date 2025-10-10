@@ -71,6 +71,7 @@ dependencies = [
     { name = "kagglehub" },
     { name = "numpy" },
     { name = "pygame" },
+    { name = "python-osc" },
     { name = "typer" },
 ]
 
@@ -84,6 +85,7 @@ requires-dist = [
     { name = "kagglehub", specifier = ">=0.3.12" },
     { name = "numpy", specifier = ">=2.3.2" },
     { name = "pygame", specifier = ">=2.6.1" },
+    { name = "python-osc", specifier = ">=1.9.3" },
     { name = "typer", specifier = ">=0.16.1" },
 ]
 
@@ -252,6 +254,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a3/5c/00a0e072241553e1a7496d638deababa67c5058571567b92a7eaa258397c/pytest-8.4.2.tar.gz", hash = "sha256:86c0d0b93306b961d58d62a4db4879f27fe25513d4b969df351abdddb3c30e01", size = 1519618, upload-time = "2025-09-04T14:34:22.711Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/a8/a4/20da314d277121d6534b3a980b29035dcd51e6744bd79075a6ce8fa4eb8d/pytest-8.4.2-py3-none-any.whl", hash = "sha256:872f880de3fc3a5bdc88a11b39c9710c3497a547cfa9320bc3c5e62fbf272e79", size = 365750, upload-time = "2025-09-04T14:34:20.226Z" },
+]
+
+[[package]]
+name = "python-osc"
+version = "1.9.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/1e/6e/770a91c92e4e8db6213764fb78531dd26a4982000d9b325881f3599835e2/python_osc-1.9.3.tar.gz", hash = "sha256:bd0fa40def43ce509894709feb0e18f02192aca192c5e6c8fe2ba69e58f21794", size = 33328, upload-time = "2024-12-23T20:24:50.939Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/57/04/01b3de6a7565cfc20f3bf4fce959b099ad30a08157865436d48cc02f6c08/python_osc-1.9.3-py3-none-any.whl", hash = "sha256:7def2075be72f07bae5a4c1a55cc7d907b247f4a5d910f3159ed30ac2b1f17cc", size = 43808, upload-time = "2024-12-23T20:24:48.358Z" },
 ]
 
 [[package]]
