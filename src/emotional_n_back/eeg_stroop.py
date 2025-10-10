@@ -1,44 +1,18 @@
 import random
-import threading
-from collections import deque
 from enum import Enum, auto
+from typing import Optional
 
 import pygame
-from pythonosc import dispatcher, osc_server
 
+from emotional_n_back.eeg.erp import OscErpServer
 from emotional_n_back.stroop import SentimentStroopGame, make_beep
+
 
 class Reward(Enum):
     SUCCESS = auto()
     FAILURE = auto()
     NONE = auto()
 
-class OSCReader:
-    def __init__(self, ip="127.0.0.1", port=5005, buffer_size=256 * 2):
-        self.ip = ip
-        self.port = port
-        self.buffer = deque(maxlen=buffer_size)
-        self.dispatcher = dispatcher.Dispatcher()
-        self.dispatcher.map("/*", self._handler)
-        self.server = osc_server.ThreadingOSCUDPServer((self.ip, self.port), self.dispatcher)
-        self.server_thread = threading.Thread(target=self.server.serve_forever)
-        self.server_thread.daemon = True
-
-    def _handler(self, address, *args):
-        # In the future, we might want to do more complex processing here
-        # For now, just append the first argument to the buffer
-        if args:
-            self.buffer.append(args[0])
-
-    def start(self):
-        self.server_thread.start()
-        print(f"Serving on {self.server.server_address}")
-
-    def stop(self):
-        self.server.shutdown()
-
-    def get_buffer(self):
-        return list(self.buffer)
 
 class EEGStroopGame(SentimentStroopGame):
     """
@@ -48,29 +22,63 @@ class EEGStroopGame(SentimentStroopGame):
     - Audio feedback (success/failure) is provided based on the reward.
     """
 
-    def __init__(self, *args, **kwargs):
+    def __init__(
+        self,
+        *args,
+        fs_fallback: float = 256.0,
+        p300_threshold: float = 2.0,
+        **kwargs,
+    ):
         super().__init__(*args, **kwargs)
-        self.osc_reader = OSCReader()
+        self.p300_threshold = p300_threshold
+        self.last_erp_update = None
+        self.erp_server = OscErpServer(
+            host="127.0.0.1",
+            port=5005,
+            fs_fallback=fs_fallback,
+            on_update=self._handle_erp_update,
+        )
+
         self.beep_success = make_beep(1300, 100, 0.5)
         self.beep_failure = make_beep(440, 200, 0.5)
+
+    def _handle_erp_update(self, update: dict):
+        """Callback to receive ERP updates."""
+        # This is where you could add more complex logic, e.g. storing
+        # a history of ERPs for different conditions.
+        self.last_erp_update = update
 
     def _get_reward(self) -> Reward:
         """
         Determines the reward based on EEG data.
-        This is a placeholder for the actual ERP analysis.
+        This is a placeholder for more sophisticated ERP analysis.
         """
-        # TODO: Implement ERP analysis here.
-        # The analysis should be based on the data in self.osc_reader.get_buffer()
-        # For now, we return a random reward.
-        return random.choice([Reward.SUCCESS, Reward.FAILURE, Reward.NONE])
+        # TODO: Implement more sophisticated ERP analysis here.
+        # This is a simple example that rewards high P300 amplitude.
+        if self.last_erp_update is None:
+            return Reward.NONE
+
+        p300_amp = self.last_erp_update.get("components", {}).get("P300", {}).get("amp")
+
+        if p300_amp is None:
+            return Reward.NONE
+
+        if p300_amp > self.p300_threshold:
+            print(f"Success! P300 amp: {p300_amp:.2f} > {self.p300_threshold:.2f}")
+            return Reward.SUCCESS
+        else:
+            print(f"Failure. P300 amp: {p300_amp:.2f} <= {self.p300_threshold:.2f}")
+            return Reward.FAILURE
 
     def run(self):
-        self.osc_reader.start()
+        self.erp_server.start()
         running = True
         while running and self.trial_num < self.length:
             # --- 1. Prepare Trial ---
             visual_sentiment = random.choice(self.sentiments)
             audio_sentiment = random.choice(self.sentiments)
+            is_congruent = visual_sentiment == audio_sentiment
+            event_code = "congruent" if is_congruent else "incongruent"
 
             image_path = self.kdef_loader.get_random_image(visual_sentiment)
             image_surface = self._load_fit_image(str(image_path), self.stimulus_rect)
@@ -100,9 +108,15 @@ class EEGStroopGame(SentimentStroopGame):
 
             # --- 3. Response Phase (Audio plays) ---
             audio_sound.play()
+            # Ingest event directly
+            self.erp_server.ingest_event(event_code)
+            print(f"Ingested event: {event_code}")
+
             response_t0 = pygame.time.get_ticks()
             # Wait for the audio to finish playing before getting the reward
-            while pygame.mixer.get_busy() and (pygame.time.get_ticks() - response_t0 < self.response_window_ms):
+            while pygame.mixer.get_busy() and (
+                pygame.time.get_ticks() - response_t0 < self.response_window_ms
+            ):
                 for event in pygame.event.get():
                     if event.type == pygame.QUIT or (
                         event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
@@ -111,11 +125,15 @@ class EEGStroopGame(SentimentStroopGame):
                 if not running:
                     break
                 self.clock.tick(120)
-            
+
             if not running:
                 break
 
             # --- 4. Reward Phase ---
+            # The reward is based on the last ERP update, which is handled
+            # by the on_update callback in a separate thread.
+            # We add a small delay to allow the ERP to be processed.
+            pygame.time.wait(500) # Wait for LPP to be captured
             reward = self._get_reward()
             if reward == Reward.SUCCESS:
                 self.beep_success.play()
@@ -142,7 +160,7 @@ class EEGStroopGame(SentimentStroopGame):
                 elif reward == Reward.FAILURE:
                     fill = (180, 60, 60, 140)
                 else:
-                    fill = (0,0,0,0) # No feedback
+                    fill = (0, 0, 0, 0)  # No feedback
                 overlay.fill(fill)
 
                 self._draw_stimulus_box(image_surface)
@@ -168,14 +186,14 @@ class EEGStroopGame(SentimentStroopGame):
 
                 self.screen.fill((20, 22, 26))
                 self._draw_header()
-                self._draw_stimulus_box() # Blank box
+                self._draw_stimulus_box()  # Blank box
                 self._draw_scorebar()
                 pygame.display.flip()
                 self.clock.tick(120)
             if not running:
                 break
 
-        self.osc_reader.stop()
+        self.erp_server.shutdown()
         if running:
             self.show_final_screen()
         pygame.quit()
