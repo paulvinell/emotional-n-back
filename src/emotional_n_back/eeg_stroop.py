@@ -4,6 +4,7 @@ import time
 from enum import Enum, auto
 from typing import Optional
 
+import numpy as np
 import pygame
 
 from emotional_n_back.eeg.erp import OscErpServer
@@ -28,11 +29,15 @@ class EEGStroopGame(SentimentStroopGame):
         self,
         *args,
         fs_fallback: float = 256.0,
-        p300_threshold: float = 2.0,
+        initial_calibration_trials: int = 10,
+        recalibration_interval: int = 10,
         **kwargs,
     ):
         super().__init__(*args, length=None, **kwargs)
-        self.p300_threshold = p300_threshold
+        self.p300_threshold: Optional[float] = None  # Set after calibration
+        self.calibration_data = []
+        self.initial_calibration_trials = initial_calibration_trials
+        self.recalibration_interval = recalibration_interval
         
         # Thread-safe mechanism for ERP updates
         self.erp_updates = {}
@@ -56,43 +61,33 @@ class EEGStroopGame(SentimentStroopGame):
         )
         self.screen.blit(hdr, (24, 24))
 
+        if self.p300_threshold is None:
+            calib_text = self.font_small.render("Calibrating...", True, (255, 255, 255))
+            self.screen.blit(calib_text, (24, 60))
+
     def _handle_erp_update(self, update: dict):
         """Callback to receive ERP updates in a thread-safe manner."""
         with self.erp_lock:
             self.erp_updates[update['code']] = update
 
-    def _get_reward(self, event_code: str) -> Reward:
+    def _get_erp_update(self, event_code: str) -> Optional[dict]:
         """
-        Determines the reward based on EEG data for a specific event.
-        Waits for a short period for the ERP result to become available.
+        Retrieves the ERP update for a specific event.
+        Waits for a short period for the result to become available.
         """
-        # Wait for the ERP result for the specific event_code
         update = None
         wait_start_t = time.monotonic()
-        while time.monotonic() - wait_start_t < 1.0: # 1-second timeout
+        while time.monotonic() - wait_start_t < 1.0:  # 1-second timeout
             with self.erp_lock:
                 if event_code in self.erp_updates:
-                    update = self.erp_updates.pop(event_code) # Pop to avoid reuse
+                    update = self.erp_updates.pop(event_code)  # Pop to avoid reuse
                     break
             time.sleep(0.01)
 
         if update is None:
             print(f"No ERP update received for event: {event_code}")
-            return Reward.NONE
 
-        # TODO: Implement more sophisticated ERP analysis here.
-        # This is a simple example that rewards high P300 amplitude.
-        p300_amp = update.get("components", {}).get("P300", {}).get("amp")
-
-        if p300_amp is None:
-            return Reward.NONE
-
-        if p300_amp > self.p300_threshold:
-            print(f"Success! P300 amp for {event_code}: {p300_amp:.2f} > {self.p300_threshold:.2f}")
-            return Reward.SUCCESS
-        else:
-            print(f"Failure. P300 amp for {event_code}: {p300_amp:.2f} <= {self.p300_threshold:.2f}")
-            return Reward.FAILURE
+        return update
 
     def run(self):
         self.erp_server.start()
@@ -171,13 +166,66 @@ class EEGStroopGame(SentimentStroopGame):
                 break
 
             # --- 4. Reward Phase ---
-            # The reward is now fetched specifically for the event of this trial
-            reward = self._get_reward(event_code)
-            if reward == Reward.SUCCESS:
-                self.beep_success.play()
-                self.score += 1
-            elif reward == Reward.FAILURE:
-                self.beep_failure.play()
+            erp_update = self._get_erp_update(event_code)
+            reward = Reward.NONE
+
+            if erp_update:
+                components = erp_update.get("components", {})
+                p300_amp = components.get("P300", {}).get("amp")
+                p300_lat = components.get("P300", {}).get("lat")
+
+                if p300_amp is not None and p300_lat is not None:
+                    self.calibration_data.append((p300_amp, p300_lat))
+
+                    # --- Calibration and Recalibration ---
+                    is_initial_cal = self.p300_threshold is None
+                    trials_needed = (
+                        self.initial_calibration_trials
+                        if is_initial_cal
+                        else self.recalibration_interval
+                    )
+                    is_calibration_time = len(self.calibration_data) >= trials_needed
+
+                    if is_calibration_time:
+                        if self.calibration_data:
+                            amps, lats = zip(*self.calibration_data)
+                            mean_amp = np.mean(amps)
+                            std_amp = np.std(amps)
+                            mean_lat = np.mean(lats)
+                            std_lat = np.std(lats)
+
+                            self.p300_threshold = mean_amp  # Set threshold to mean
+                            print(
+                                f"\n--- Recalibrating ---"
+                                f"\nNew P300 Amp Threshold: {self.p300_threshold:.2f}"
+                                f"\nStats (last {len(self.calibration_data)} trials):"
+                                f"  Amp: μ={mean_amp:.2f}, σ={std_amp:.2f}"
+                                f"  Lat: μ={mean_lat:.2f}, σ={std_lat:.2f}"
+                                f"\n---------------------"
+                            )
+                            # Reset for the next batch
+                            self.calibration_data = []
+
+                    # --- Reward Determination (post-calibration) ---
+                    elif self.p300_threshold is not None:
+                        if p300_amp > self.p300_threshold:
+                            print(
+                                f"Success! P300 amp for {event_code}: {p300_amp:.2f} > {self.p300_threshold:.2f}"
+                            )
+                            reward = Reward.SUCCESS
+                        else:
+                            print(
+                                f"Failure. P300 amp for {event_code}: {p300_amp:.2f} <= {self.p300_threshold:.2f}"
+                            )
+                            reward = Reward.FAILURE
+
+            # --- Reward sound and score update (only if not calibrating) ---
+            if self.p300_threshold is not None:
+                if reward == Reward.SUCCESS:
+                    self.beep_success.play()
+                    self.score += 1
+                elif reward == Reward.FAILURE:
+                    self.beep_failure.play()
 
             # --- 5. Feedback Phase ---
             feedback_t0 = pygame.time.get_ticks()

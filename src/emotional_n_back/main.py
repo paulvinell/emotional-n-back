@@ -373,6 +373,12 @@ def eeg_stroop(
     seed: int | None = None,
     visual_intro_ms: int = 500,
     response_window_ms: int = 2000,
+    initial_calibration_trials: int = typer.Option(
+        10, help="Number of trials for initial calibration."
+    ),
+    recalibration_interval: int = typer.Option(
+        10, help="How often to recalibrate the threshold."
+    ),
 ):
     """
     Run an EEG-integrated sentiment Stroop test.
@@ -381,6 +387,8 @@ def eeg_stroop(
         seed=seed,
         visual_intro_ms=visual_intro_ms,
         response_window_ms=response_window_ms,
+        initial_calibration_trials=initial_calibration_trials,
+        recalibration_interval=recalibration_interval,
     )
     game.run()
 
