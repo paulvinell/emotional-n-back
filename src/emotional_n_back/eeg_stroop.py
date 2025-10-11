@@ -37,16 +37,24 @@ class EEGStroopGame(SentimentStroopGame):
         # Thread-safe mechanism for ERP updates
         self.erp_updates = {}
         self.erp_lock = threading.Lock()
+        self.eeg_started = threading.Event()
 
         self.erp_server = OscErpServer(
             host="127.0.0.1",
             port=5005,
             fs_fallback=fs_fallback,
             on_update=self._handle_erp_update,
+            eeg_started=self.eeg_started,
         )
 
         self.beep_success = make_beep(1300, 100, 0.5)
         self.beep_failure = make_beep(440, 200, 0.5)
+
+    def _draw_header(self):
+        hdr = self.font_big.render(
+            f"Trial {self.trial_num + 1}/{self.length}", True, (235, 235, 235)
+        )
+        self.screen.blit(hdr, (24, 24))
 
     def _handle_erp_update(self, update: dict):
         """Callback to receive ERP updates in a thread-safe manner."""
@@ -88,6 +96,22 @@ class EEGStroopGame(SentimentStroopGame):
 
     def run(self):
         self.erp_server.start()
+
+        # Wait for EEG stream to start
+        font = pygame.font.Font(None, 48)
+        text = font.render("Waiting for EEG stream...", True, (255, 255, 255))
+        text_rect = text.get_rect(center=self.screen.get_rect().center)
+        while not self.eeg_started.is_set():
+            for event in pygame.event.get():
+                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                    self.erp_server.shutdown()
+                    pygame.quit()
+                    return
+            self.screen.fill((20, 22, 26))
+            self.screen.blit(text, text_rect)
+            pygame.display.flip()
+            self.clock.tick(10)
+
         running = True
         while running and self.trial_num < self.length:
             # --- 1. Prepare Trial ---

@@ -297,6 +297,7 @@ class OscErpServer:
         baseline: Tuple[Optional[float], Optional[float]] = (None, 0.0),
         logger: Optional[logging.Logger] = None,
         on_update: Optional[Callable[[dict], None]] = None,
+        eeg_started: Optional[threading.Event] = None,
     ) -> None:
         from pythonosc.dispatcher import Dispatcher
         from pythonosc.osc_server import ThreadingOSCUDPServer
@@ -305,6 +306,7 @@ class OscErpServer:
         self._fs_hint = float(fs_fallback)
         self.epocher: Optional[StreamEpocher] = None
         self.on_update = on_update
+        self.eeg_started = eeg_started
 
         self._q = queue.Queue()  # queue of callables to serialize ingestion
 
@@ -335,6 +337,8 @@ class OscErpServer:
 
     def _handle_eeg(self, addr: str, *args):
         """Accepts /eeg [samples] messages."""
+        if self.eeg_started and not self.eeg_started.is_set():
+            self.eeg_started.set()
         try:
             samples = np.asarray(args, dtype=np.float64)
 
