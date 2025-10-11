@@ -35,15 +35,18 @@ def reader(
 ):
     """OSC reader."""
     import threading
+    import time
     from collections import deque
     import numpy as np
 
     data_buffer = deque(maxlen=buffer_size)
+    time_buffer = deque(maxlen=buffer_size)
 
     def handler(address, *args):
         if visualize:
             # Assuming the first arg is the eeg signal
             data_buffer.append(args[0])
+            time_buffer.append(time.time())
         else:
             print(f"Received message from {address}: {args}")
 
@@ -63,12 +66,27 @@ def reader(
         fig, ax = plt.subplots()
         line, = ax.plot(np.zeros(buffer_size))
         ax.set_ylim(-3, 3)
-        ax.set_xlim(0, buffer_size)
+        ax.set_xlim(0, 5)
         plt.show()
 
+        start_time = time.time()
         while True:
             try:
-                line.set_ydata(list(data_buffer) + [0] * (buffer_size - len(data_buffer)))
+                if not data_buffer:
+                    plt.pause(0.01)
+                    continue
+
+                # Vertical auto-scaling
+                min_val = min(data_buffer)
+                max_val = max(data_buffer)
+                margin = (max_val - min_val) * 0.1
+                ax.set_ylim(min_val - margin, max_val + margin)
+
+                # Horizontal auto-scaling
+                current_time = time.time()
+                ax.set_xlim(current_time - 5, current_time)
+                
+                line.set_data(list(time_buffer), list(data_buffer))
                 fig.canvas.draw()
                 fig.canvas.flush_events()
                 plt.pause(0.01)
@@ -97,15 +115,19 @@ def writer(
     rate_per_sec: float = 0.5,
     dur_range: str = "0.2,0.8",
     amp_range: str = "0.15,0.7",
+    eeg_path: str = typer.Option(None, "--eeg-path", help="Path to the EEG recording file."),
 ):
     """OSC writer."""
+    if eeg_path:
+        mode = "eeg_file"
+
     if mode == "dummy":
         from emotional_n_back.streaming.dummy import DummyStreamer
         if address is None:
             address = "/some/address"
         streamer = DummyStreamer(ip=ip, port=port, address=address, message=message)
     elif mode == "eeg":
-        from emotional_n_back.streaming.eeg import EEGStreamer
+        from emotional_n_back.streaming.eeg_generator import EEGStreamer
         if address is None:
             address = "/eeg"
         streamer = EEGStreamer(
@@ -119,11 +141,17 @@ def writer(
             dur_range=dur_range,
             amp_range=amp_range,
         )
+    elif mode == "eeg_file":
+        from emotional_n_back.streaming.eeg_file_writer import EEGWriter
+        streamer = EEGWriter(eeg_path=eeg_path, host=ip, port=port)
     else:
         print(f"Unknown mode: {mode}")
         raise typer.Exit(code=1)
 
-    streamer.stream()
+    if mode == "dummy":
+        streamer.stream()
+    else:
+        streamer.start()
 
 
 @app.command()
