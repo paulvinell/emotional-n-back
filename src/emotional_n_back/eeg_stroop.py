@@ -31,7 +31,7 @@ class EEGStroopGame(SentimentStroopGame):
         p300_threshold: float = 2.0,
         **kwargs,
     ):
-        super().__init__(*args, **kwargs)
+        super().__init__(*args, length=None, **kwargs)
         self.p300_threshold = p300_threshold
         
         # Thread-safe mechanism for ERP updates
@@ -52,7 +52,7 @@ class EEGStroopGame(SentimentStroopGame):
 
     def _draw_header(self):
         hdr = self.font_big.render(
-            f"Trial {self.trial_num + 1}/{self.length}", True, (235, 235, 235)
+            f"Trial {self.trial_num + 1}", True, (235, 235, 235)
         )
         self.screen.blit(hdr, (24, 24))
 
@@ -113,7 +113,7 @@ class EEGStroopGame(SentimentStroopGame):
             self.clock.tick(10)
 
         running = True
-        while running and self.trial_num < self.length:
+        while running:
             # --- 1. Prepare Trial ---
             visual_sentiment = random.choice(self.sentiments)
             audio_sentiment = random.choice(self.sentiments)

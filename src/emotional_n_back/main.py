@@ -370,7 +370,6 @@ def alternating_stroop(
 
 @app.command()
 def eeg_stroop(
-    length: int = 30,
     seed: int | None = None,
     visual_intro_ms: int = 500,
     response_window_ms: int = 2000,
@@ -379,7 +378,6 @@ def eeg_stroop(
     Run an EEG-integrated sentiment Stroop test.
     """
     game = EEGStroopGame(
-        length=length,
         seed=seed,
         visual_intro_ms=visual_intro_ms,
         response_window_ms=response_window_ms,

@@ -59,7 +59,7 @@ class SentimentStroopGame:
     def __init__(
         self,
         *,
-        length: int = 30,
+        length: Optional[int] = 30,
         seed: Optional[int] = None,
         visual_intro_ms: int = 500,  # Time face is shown before audio
         response_window_ms: int = 2000,  # Time to answer after audio starts
@@ -152,9 +152,9 @@ class SentimentStroopGame:
 
     def run(self):
         running = True
-        while running and self.trial_num < self.length:
-            # --- 1. Prepare Trial ---
-            visual_sentiment = random.choice(self.sentiments)
+        while running:
+            if self.length is not None and self.trial_num >= self.length:
+                break
             audio_sentiment = random.choice(self.sentiments)
 
             image_path = self.kdef_loader.get_random_image(visual_sentiment)
