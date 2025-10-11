@@ -38,7 +38,7 @@ class EEGStroopGame(SentimentStroopGame):
         self.calibration_data = []
         self.initial_calibration_trials = initial_calibration_trials
         self.recalibration_interval = recalibration_interval
-        
+
         # Thread-safe mechanism for ERP updates
         self.erp_updates = {}
         self.erp_lock = threading.Lock()
@@ -55,20 +55,26 @@ class EEGStroopGame(SentimentStroopGame):
         self.beep_success = make_beep(1300, 100, 0.5)
         self.beep_failure = make_beep(440, 200, 0.5)
 
+        self.scoreable_trial_num = 0  # Only incremented after calibration
+
     def _draw_header(self):
-        hdr = self.font_big.render(
-            f"Trial {self.trial_num + 1}", True, (235, 235, 235)
-        )
+        hdr = self.font_big.render(f"Trial {self.trial_num + 1}", True, (235, 235, 235))
         self.screen.blit(hdr, (24, 24))
 
         if self.p300_threshold is None:
             calib_text = self.font_small.render("Calibrating...", True, (255, 255, 255))
             self.screen.blit(calib_text, (24, 60))
 
+    def _draw_scorebar(self):
+        s_txt = self.font_small.render(
+            f"Score: {self.score}/{self.scoreable_trial_num}", True, (200, 200, 200)
+        )
+        self.screen.blit(s_txt, (24, self.screen.get_height() - 30))
+
     def _handle_erp_update(self, update: dict):
         """Callback to receive ERP updates in a thread-safe manner."""
         with self.erp_lock:
-            self.erp_updates[update['code']] = update
+            self.erp_updates[update["code"]] = update
 
     def _get_erp_update(self, event_code: str) -> Optional[dict]:
         """
@@ -98,7 +104,9 @@ class EEGStroopGame(SentimentStroopGame):
         text_rect = text.get_rect(center=self.screen.get_rect().center)
         while not self.eeg_started.is_set():
             for event in pygame.event.get():
-                if event.type == pygame.QUIT or (event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE):
+                if event.type == pygame.QUIT or (
+                    event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+                ):
                     self.erp_server.shutdown()
                     pygame.quit()
                     return
@@ -114,7 +122,9 @@ class EEGStroopGame(SentimentStroopGame):
             audio_sentiment = random.choice(self.sentiments)
             is_congruent = visual_sentiment == audio_sentiment
             # Create a unique event code for this trial
-            event_code = f"{'congruent' if is_congruent else 'incongruent'}_{self.trial_num}"
+            event_code = (
+                f"{'congruent' if is_congruent else 'incongruent'}_{self.trial_num}"
+            )
 
             image_path = self.kdef_loader.get_random_image(visual_sentiment)
             image_surface = self._load_fit_image(str(image_path), self.stimulus_rect)
@@ -258,6 +268,8 @@ class EEGStroopGame(SentimentStroopGame):
                 break
 
             self.trial_num += 1
+            if self.p300_threshold is not None:
+                self.scoreable_trial_num += 1
 
             # --- 6. Inter-trial Interval (ISI) ---
             isi_t0 = pygame.time.get_ticks()
