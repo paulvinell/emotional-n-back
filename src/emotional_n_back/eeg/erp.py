@@ -15,7 +15,7 @@ from typing import Callable, Deque, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import butter, filtfilt
+from scipy.signal import butter, sosfilt
 
 # ----------------------- Configuration -----------------------
 
@@ -57,12 +57,18 @@ class RingBuffer:
 
     def has_range(self, start_idx: int, end_idx: int) -> bool:
         """Return True if [start_idx, end_idx) is fully available."""
+        if end_idx <= start_idx:
+            return False
         earliest = self.start_idx
         latest = self.start_idx + min(self.n_written, self.capacity)
         return start_idx >= earliest and end_idx <= latest
 
     def get_range(self, start_idx: int, end_idx: int) -> NDArray[np.float64]:
         """Materialize [start_idx, end_idx) into a 1-D array."""
+        if end_idx <= start_idx:
+            raise ValueError("end_idx must be greater than start_idx")
+        if not self.has_range(start_idx, end_idx):
+            raise ValueError("Requested range not fully available in buffer")
         L = end_idx - start_idx
         out = np.empty(L, dtype=np.float64)
         for i in range(L):
@@ -75,16 +81,20 @@ class RingBuffer:
 class RunningAverage:
     """Incremental mean for ERP updates (1-D)."""
 
-    n: int
-    avg: NDArray[np.float64]
+    alpha: float
+    avg: np.ndarray
+    n: int = 0
 
     @classmethod
-    def init_like(cls, length: int) -> "RunningAverage":
-        return cls(n=0, avg=np.zeros(length, dtype=np.float64))
+    def init_like(cls, length, alpha=0.1) -> "RunningAverage":
+        return cls(alpha=alpha, avg=np.zeros(length))
 
-    def update(self, x: NDArray[np.float64]) -> None:
+    def update(self, x: np.ndarray) -> None:
         self.n += 1
-        self.avg += (x - self.avg) / self.n
+        if self.n == 1:
+            self.avg = x.copy()
+        else:
+            self.avg += self.alpha * (x - self.avg)
 
 
 # ----------------------- Stream Epocher ----------------------
@@ -141,7 +151,8 @@ class StreamEpocher:
         high = min(lp, nyq - 1e-6) / nyq
         if not (0 < low < high < 1):
             raise ValueError(f"Invalid band [{hp}, {lp}] for fs={fs}")
-        self.b, self.a = butter(4, [low, high], btype="band")
+        self.sos = butter(4, [low, high], btype="band", output="sos")
+        self.filt_zi = np.zeros((self.sos.shape[0], 2))
 
         # Epoch time base (constant length)
         self.n_pre = int(round(-tmin * fs))
@@ -162,22 +173,31 @@ class StreamEpocher:
         if x.ndim != 1:
             raise ValueError("Samples must be a 1-D array")
 
-        # Zero-phase band-pass, robust pad length
-        padlen = max(3 * max(len(self.a), len(self.b)), min(31, x.size - 1))
-        if padlen > 0 and x.size > padlen:
-            x = filtfilt(self.b, self.a, x, axis=0, padlen=padlen)
+        y, self.filt_zi = sosfilt(self.sos, x, zi=self.filt_zi)
 
-        self.rb.append(x)
-        self.global_idx += x.size
+        self.rb.append(y)
+        self.global_idx += y.size
 
     def ingest_event(self, code: str) -> None:
         """
         Register an event. The event is timestamped at the current end of the stream.
         """
-        idx = self.global_idx
-        self.events.append((idx, str(code)))
+        self.ingest_event_at(self.global_idx, code)
+
+    def ingest_event_at(self, global_sample_idx: int, code: str) -> None:
+        """
+        Register an event with a precise sample index.
+        """
+        self.events.append((int(global_sample_idx), str(code)))
 
     # ------------------ epoching & ERP updates ------------------
+
+    def _is_clean(self, epoch, p2p_thresh=150.0, slope_thresh=75.0):
+        if np.ptp(epoch) > p2p_thresh:  # large blink/motion
+            return False
+        if np.max(np.abs(np.diff(epoch))) > slope_thresh:  # EMG burst
+            return False
+        return True
 
     def _baseline_correct(self, epoch: NDArray[np.float64]) -> NDArray[np.float64]:
         b0, b1 = self.baseline
@@ -236,11 +256,16 @@ class StreamEpocher:
                 continue
             if self.rb.has_range(start, end):
                 epoch = self.rb.get_range(start, end)
+
+                if not self._is_clean(epoch):
+                    self.events.remove((ev_idx, code))
+                    continue
+
                 epoch = self._baseline_correct(epoch)
 
                 ra = self.running.get(code)
                 if ra is None:
-                    ra = RunningAverage.init_like(self.epoch_len)
+                    ra = RunningAverage.init_like(self.epoch_len, alpha=0.1)
                 ra.update(epoch)
                 self.running[code] = ra
 
