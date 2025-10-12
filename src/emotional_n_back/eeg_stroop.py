@@ -187,6 +187,19 @@ class EEGStroopGame(SentimentStroopGame):
                 p300_lat = component.get("P300", {}).get("lat")
 
                 if p300_amp is not None and p300_lat is not None:
+                    # --- Reward Determination (if we have a threshold) ---
+                    if self.p300_threshold is not None:
+                        if p300_amp > self.p300_threshold:
+                            print(
+                                f"Success! P300 amp for {event_code}: {p300_amp:.2f} > {self.p300_threshold:.2f}"
+                            )
+                            reward = Reward.SUCCESS
+                        else:
+                            print(
+                                f"Failure. P300 amp for {event_code}: {p300_amp:.2f} <= {self.p300_threshold:.2f}"
+                            )
+                            reward = Reward.FAILURE
+
                     self.calibration_data.append((p300_amp, p300_lat))
 
                     # --- Calibration and Recalibration ---
@@ -217,19 +230,6 @@ class EEGStroopGame(SentimentStroopGame):
                             )
                             # Reset for the next batch
                             self.calibration_data = []
-
-                    # --- Reward Determination (post-calibration) ---
-                    elif self.p300_threshold is not None:
-                        if p300_amp > self.p300_threshold:
-                            print(
-                                f"Success! P300 amp for {event_code}: {p300_amp:.2f} > {self.p300_threshold:.2f}"
-                            )
-                            reward = Reward.SUCCESS
-                        else:
-                            print(
-                                f"Failure. P300 amp for {event_code}: {p300_amp:.2f} <= {self.p300_threshold:.2f}"
-                            )
-                            reward = Reward.FAILURE
 
             # --- Reward sound and score update (only if not calibrating) ---
             if self.p300_threshold is not None:
