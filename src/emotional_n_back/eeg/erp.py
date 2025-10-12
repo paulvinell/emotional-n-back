@@ -237,29 +237,28 @@ class StreamEpocher:
             out[name] = {"amp": amp, "lat": lat}
         return out
 
-    def materialize_ready_epochs(
+    def materialize_one_ready_epoch(
         self,
-    ) -> List[Dict[str, Union[str, int, Dict[str, Dict[str, float]]]]]:
+    ) -> Optional[List[Dict[str, Union[str, int, Dict[str, Dict[str, float]]]]]]:
         """
-        Try to realize any epochs whose full tmin..tmax window is now available.
-        For each realized epoch, update the running ERP and return a summary dict.
+        Try to realize the single earliest epoch whose window is now available.
+        If realized, update the running ERP and return a summary dict.
         """
-        updates: List[Dict[str, Union[str, int, Dict[str, Dict[str, float]]]]] = []
-        need_pre = self.n_pre
-        need_post = self.n_post
+        # Sort events by timestamp to ensure we process the earliest one first
+        sorted_events = sorted(self.events, key=lambda x: x[0])
 
-        # iterate over a copy; remove as we go
-        for ev_idx, code in list(self.events):
-            start = ev_idx - need_pre
-            end = ev_idx + need_post
+        for ev_idx, code in sorted_events:
+            start = ev_idx - self.n_pre
+            end = ev_idx + self.n_post
             if start < 0:
                 continue
+
             if self.rb.has_range(start, end):
                 epoch = self.rb.get_range(start, end)
 
                 if not self._is_clean(epoch):
                     self.events.remove((ev_idx, code))
-                    continue
+                    continue  # Try the next event
 
                 epoch = self._baseline_correct(epoch)
 
@@ -270,10 +269,18 @@ class StreamEpocher:
                 self.running[code] = ra
 
                 comps = self._score_components(ra.avg)
-                updates.append({"code": code, "n": ra.n, "components": comps})
+                updates = []
+                for comp_name, comp_data in comps.items():
+                    update = {
+                        "code": code,
+                        "n": ra.n,
+                        "component": {comp_name: comp_data},
+                    }
+                    updates.append(update)
                 self.events.remove((ev_idx, code))
+                return updates  # Return a list of updates
 
-        return updates
+        return None
 
 
 # ----------------------- OSC Server Wrapper -------------------
@@ -353,24 +360,44 @@ class OscErpServer:
     # ------------------ worker & lifecycle ------------------
 
     def _work_loop(self):
+        """
+        Data-driven worker loop.
+        - Blocks waiting for data/events from the queue.
+        - Processes all available items.
+        - Materializes any epochs that are now ready.
+        This avoids polling and unnecessary sleeps.
+        """
         while True:
             try:
-                fn = self._q.get(timeout=0.05)
+                # Block until the first item is available
+                fn = self._q.get()
                 fn()
-            except queue.Empty:
-                pass
+
+                # Process all other currently available items
+                while not self._q.empty():
+                    try:
+                        fn = self._q.get_nowait()
+                        fn()
+                    except queue.Empty:
+                        break  # Should not happen with this logic, but for safety
+
             except Exception as e:
-                self.logger.exception("Worker error: %s", e)
+                self.logger.exception("Worker error processing queue: %s", e)
+                continue
 
-            # Try to materialize epochs and print updates
+            # After processing a batch of ingestions, materialize and publish all ready epochs
             if self.epocher is not None:
-                updates = self.epocher.materialize_ready_epochs()
-                for u in updates:
-                    print(json.dumps({"type": "erp_update", **u}), flush=True)
-                    if self.on_update:
-                        self.on_update(u)
-
-            time.sleep(0.005)
+                try:
+                    while True:
+                        updates = self.epocher.materialize_one_ready_epoch()
+                        if updates is None:
+                            break  # No more ready epochs
+                        for update in updates:
+                            print(json.dumps({"type": "erp_update", **update}), flush=True)
+                            if self.on_update:
+                                self.on_update(update)
+                except Exception as e:
+                    self.logger.exception("Worker error materializing epochs: %s", e)
 
     def start(self):
         self._thread.start()

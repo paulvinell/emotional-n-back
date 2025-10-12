@@ -73,8 +73,10 @@ class EEGStroopGame(SentimentStroopGame):
 
     def _handle_erp_update(self, update: dict):
         """Callback to receive ERP updates in a thread-safe manner."""
-        with self.erp_lock:
-            self.erp_updates[update["code"]] = update
+        # We are only interested in P300 for reward
+        if "P300" in update.get("component", {}):
+            with self.erp_lock:
+                self.erp_updates[update["code"]] = update
 
     def _get_erp_update(self, event_code: str) -> Optional[dict]:
         """
@@ -180,9 +182,9 @@ class EEGStroopGame(SentimentStroopGame):
             reward = Reward.NONE
 
             if erp_update:
-                components = erp_update.get("components", {})
-                p300_amp = components.get("P300", {}).get("amp")
-                p300_lat = components.get("P300", {}).get("lat")
+                component = erp_update.get("component", {})
+                p300_amp = component.get("P300", {}).get("amp")
+                p300_lat = component.get("P300", {}).get("lat")
 
                 if p300_amp is not None and p300_lat is not None:
                     self.calibration_data.append((p300_amp, p300_lat))
