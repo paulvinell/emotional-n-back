@@ -33,11 +33,17 @@ class EEGStroopGame(SentimentStroopGame):
         recalibration_interval: int = 10,
         outlier_std_devs: Optional[float] = 3.0,
         erp_component: str = "P300",
+        trial_duration_ms: Optional[int] = 4000,
         **kwargs,
     ):
         super().__init__(*args, length=None, **kwargs)
         self.erp_component = erp_component
+        self.trial_duration_ms = trial_duration_ms
         self.erp_threshold: Optional[float] = None  # Set after calibration
+        self.mean_amp: Optional[float] = None
+        self.std_amp: Optional[float] = None
+        self.mean_lat: Optional[float] = None
+        self.std_lat: Optional[float] = None
         self.calibration_data = []
         self.initial_calibration_trials = initial_calibration_trials
         if recalibration_interval < 2:
@@ -48,6 +54,7 @@ class EEGStroopGame(SentimentStroopGame):
         # Thread-safe mechanism for ERP updates
         self.erp_updates = {}
         self.erp_lock = threading.Lock()
+        self.erp_cond = threading.Condition(self.erp_lock)
         self.eeg_started = threading.Event()
 
         self.erp_server = OscErpServer(
@@ -80,10 +87,10 @@ class EEGStroopGame(SentimentStroopGame):
 
     def _handle_erp_update(self, update: dict):
         """Callback to receive ERP updates in a thread-safe manner."""
-        # We are only interested in P300 for reward
         if self.erp_component in update.get("component", {}):
-            with self.erp_lock:
+            with self.erp_cond:
                 self.erp_updates[update["code"]] = update
+                self.erp_cond.notify()
 
     def _get_erp_update(self, event_code: str) -> Optional[dict]:
         """
@@ -91,13 +98,10 @@ class EEGStroopGame(SentimentStroopGame):
         Waits for a short period for the result to become available.
         """
         update = None
-        wait_start_t = time.monotonic()
-        while time.monotonic() - wait_start_t < 1.0:  # 1-second timeout
-            with self.erp_lock:
-                if event_code in self.erp_updates:
-                    update = self.erp_updates.pop(event_code)  # Pop to avoid reuse
-                    break
-            time.sleep(0.01)
+        with self.erp_cond:
+            self.erp_cond.wait_for(lambda: event_code in self.erp_updates, timeout=1.0)
+            if event_code in self.erp_updates:
+                update = self.erp_updates.pop(event_code)
 
         if update is None:
             print(f"No ERP update received for event: {event_code}")
@@ -126,6 +130,7 @@ class EEGStroopGame(SentimentStroopGame):
 
         running = True
         while running:
+            trial_start_t = pygame.time.get_ticks()
             # --- 1. Prepare Trial ---
             visual_sentiment = random.choice(self.sentiments)
             audio_sentiment = random.choice(self.sentiments)
@@ -194,18 +199,28 @@ class EEGStroopGame(SentimentStroopGame):
                 lat = component.get(self.erp_component, {}).get("lat")
 
                 if amp is not None and lat is not None:
-                    # --- Reward Determination (if we have a threshold) ---
-                    if self.erp_threshold is not None:
-                        if amp > self.erp_threshold:
-                            print(
-                                f"Success! {self.erp_component} amp for {event_code}: {amp:.2f} > {self.erp_threshold:.2f}"
-                            )
-                            reward = Reward.SUCCESS
+                    # --- Reward Determination (z-score based) ---
+                    if (
+                        self.mean_amp is not None
+                        and self.std_amp is not None
+                        and self.mean_lat is not None
+                        and self.std_lat is not None
+                    ):
+                        if self.std_amp > 1e-6 and self.std_lat > 1e-6:
+                            z_amp = (amp - self.mean_amp) / self.std_amp
+                            z_lat = (self.mean_lat - lat) / self.std_lat
+                            avg_z = (z_amp + z_lat) / 2
+
+                            if avg_z > 0.5:
+                                reward = Reward.SUCCESS
+                            elif avg_z < -0.5:
+                                reward = Reward.FAILURE
+                            else:
+                                reward = Reward.NONE
                         else:
-                            print(
-                                f"Failure. {self.erp_component} amp for {event_code}: {amp:.2f} <= {self.erp_threshold:.2f}"
-                            )
-                            reward = Reward.FAILURE
+                            reward = Reward.NONE
+                    else:
+                        reward = Reward.NONE
 
                     self.calibration_data.append((amp, lat))
 
@@ -220,15 +235,17 @@ class EEGStroopGame(SentimentStroopGame):
 
                     if is_calibration_time:
                         if self.calibration_data:
-                            mean_amp = np.mean([d[0] for d in self.calibration_data])
-                            std_amp = np.std([d[0] for d in self.calibration_data])
+                            mean_amp_cal = np.mean(
+                                [d[0] for d in self.calibration_data]
+                            )
+                            std_amp_cal = np.std([d[0] for d in self.calibration_data])
 
                             if self.outlier_std_devs is not None:
                                 filtered_data = [
                                     d
                                     for d in self.calibration_data
-                                    if abs(d[0] - mean_amp)
-                                    <= self.outlier_std_devs * std_amp
+                                    if abs(d[0] - mean_amp_cal)
+                                    <= self.outlier_std_devs * std_amp_cal
                                 ]
                             else:
                                 filtered_data = self.calibration_data
@@ -238,7 +255,7 @@ class EEGStroopGame(SentimentStroopGame):
                                 and len(self.calibration_data) >= 2
                             ):
                                 deviations = [
-                                    (d, abs(d[0] - mean_amp))
+                                    (d, abs(d[0] - mean_amp_cal))
                                     for d in self.calibration_data
                                 ]
                                 deviations.sort(key=lambda x: x[1])
@@ -248,18 +265,18 @@ class EEGStroopGame(SentimentStroopGame):
 
                             if final_data:
                                 amps, lats = zip(*final_data)
-                                mean_amp = np.mean(amps)
-                                std_amp = np.std(amps)
-                                mean_lat = np.mean(lats)
-                                std_lat = np.std(lats)
+                                self.mean_amp = np.mean(amps)
+                                self.std_amp = np.std(amps)
+                                self.mean_lat = np.mean(lats)
+                                self.std_lat = np.std(lats)
+                                self.erp_threshold = self.mean_amp
 
-                                self.erp_threshold = mean_amp  # Set threshold to mean
                                 print(
                                     f"\n--- Recalibrating ---"
                                     f"\nNew {self.erp_component} Amp Threshold: {self.erp_threshold:.2f}"
                                     f"\nStats (last {len(final_data)} trials):"
-                                    f"  Amp: μ={mean_amp:.2f}, σ={std_amp:.2f}"
-                                    f"  Lat: μ={mean_lat:.2f}, σ={std_lat:.2f}"
+                                    f"  Amp: μ={self.mean_amp:.2f}, σ={self.std_amp:.2f}"
+                                    f"  Lat: μ={self.mean_lat:.2f}, σ={self.std_lat:.2f}"
                                     f"\n---------------------"
                                 )
                                 # Reset for the next batch
@@ -273,57 +290,98 @@ class EEGStroopGame(SentimentStroopGame):
                 elif reward == Reward.FAILURE:
                     self.beep_failure.play()
 
-            # --- 5. Feedback Phase ---
-            feedback_t0 = pygame.time.get_ticks()
-            while pygame.time.get_ticks() - feedback_t0 < self.feedback_ms:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT or (
-                        event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
-                    ):
-                        running = False
-                if not running:
-                    break
-
-                self.screen.fill((20, 22, 26))
-                self._draw_header()
-                overlay = pygame.Surface(self.stimulus_rect.size, pygame.SRCALPHA)
-                if reward == Reward.SUCCESS:
-                    fill = (40, 160, 90, 140)
-                elif reward == Reward.FAILURE:
-                    fill = (180, 60, 60, 140)
-                else:
-                    fill = (0, 0, 0, 0)  # No feedback
-                overlay.fill(fill)
-
-                self._draw_stimulus_box(image_surface)
-                self.screen.blit(overlay, self.stimulus_rect.topleft)
-                self._draw_scorebar()
-                pygame.display.flip()
-                self.clock.tick(120)
-            if not running:
-                break
-
             self.trial_num += 1
             if self.erp_threshold is not None:
                 self.scoreable_trial_num += 1
 
-            # --- 6. Inter-trial Interval (ISI) ---
-            isi_t0 = pygame.time.get_ticks()
-            while pygame.time.get_ticks() - isi_t0 < self.isi_ms:
-                for event in pygame.event.get():
-                    if event.type == pygame.QUIT or (
-                        event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
-                    ):
-                        running = False
+            # --- Inter-trial Interval (ISI) with integrated feedback ---
+            if self.trial_duration_ms is not None:
+                elapsed_ms = pygame.time.get_ticks() - trial_start_t
+                wait_ms = self.trial_duration_ms - elapsed_ms
+                if wait_ms > 0:
+                    isi_t0 = pygame.time.get_ticks()
+                    while pygame.time.get_ticks() - isi_t0 < wait_ms:
+                        for event in pygame.event.get():
+                            if event.type == pygame.QUIT or (
+                                event.type == pygame.KEYDOWN
+                                and event.key == pygame.K_ESCAPE
+                            ):
+                                running = False
+                        if not running:
+                            break
+
+                        self.screen.fill((20, 22, 26))
+                        self._draw_header()
+                        # Draw feedback overlay on stimulus
+                        overlay = pygame.Surface(
+                            self.stimulus_rect.size, pygame.SRCALPHA
+                        )
+                        if reward == Reward.SUCCESS:
+                            fill = (40, 160, 90, 140)
+                        elif reward == Reward.FAILURE:
+                            fill = (180, 60, 60, 140)
+                        else:
+                            fill = (0, 0, 0, 0)
+                        overlay.fill(fill)
+
+                        self._draw_stimulus_box(image_surface)
+                        self.screen.blit(overlay, self.stimulus_rect.topleft)
+
+                        self._draw_scorebar()
+                        pygame.display.flip()
+                        self.clock.tick(120)
+            else:
+                # Fallback to original feedback + ISI logic
+                # --- 5. Feedback Phase ---
+                feedback_t0 = pygame.time.get_ticks()
+                while pygame.time.get_ticks() - feedback_t0 < self.feedback_ms:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT or (
+                            event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+                        ):
+                            running = False
+                    if not running:
+                        break
+
+                    self.screen.fill((20, 22, 26))
+                    self._draw_header()
+                    overlay = pygame.Surface(
+                        self.stimulus_rect.size, pygame.SRCALPHA
+                    )
+                    if reward == Reward.SUCCESS:
+                        fill = (40, 160, 90, 140)
+                    elif reward == Reward.FAILURE:
+                        fill = (180, 60, 60, 140)
+                    else:
+                        fill = (0, 0, 0, 0)  # No feedback
+                    overlay.fill(fill)
+
+                    self._draw_stimulus_box(image_surface)
+                    self.screen.blit(overlay, self.stimulus_rect.topleft)
+                    self._draw_scorebar()
+                    pygame.display.flip()
+                    self.clock.tick(120)
                 if not running:
                     break
 
-                self.screen.fill((20, 22, 26))
-                self._draw_header()
-                self._draw_stimulus_box()  # Blank box
-                self._draw_scorebar()
-                pygame.display.flip()
-                self.clock.tick(120)
+                # --- 6. Inter-trial Interval (ISI) ---
+                isi_t0 = pygame.time.get_ticks()
+                while pygame.time.get_ticks() - isi_t0 < self.isi_ms:
+                    for event in pygame.event.get():
+                        if event.type == pygame.QUIT or (
+                            event.type == pygame.KEYDOWN
+                            and event.key == pygame.K_ESCAPE
+                        ):
+                            running = False
+                    if not running:
+                        break
+
+                    self.screen.fill((20, 22, 26))
+                    self._draw_header()
+                    self._draw_stimulus_box()  # Blank box
+                    self._draw_scorebar()
+                    pygame.display.flip()
+                    self.clock.tick(120)
             if not running:
                 break
 
