@@ -36,6 +36,7 @@ class PendingEvent:
     ev_idx: int
     code: str
     pending_components: List[str]
+    epoch_avg_done: bool = False
 
 
 @dataclass
@@ -111,11 +112,11 @@ class StreamEpocher:
     """
     Online epocher for single-channel EEG.
 
-    - Maintains a ring buffer of recent samples (a bit larger than tmin..tmax).
-    - Accepts chunks of raw samples; applies zero-phase band-pass per chunk.
-    - Accepts events; as soon as post-stim samples exist, it extracts an epoch,
-      baseline-corrects, and updates a running ERP per condition.
-    - Extracts P1 / N1 / N200 / P300 peaks, and LPP mean on each update.
+    - Maintains a ring buffer of recent samples.
+    - Accepts chunks of raw samples; applies causal band-pass filtering.
+    - Accepts events and publishes ERP components (P1, N1, etc.) as soon as their
+      respective time windows are available.
+    - Optionally maintains a running average of the full ERP waveform.
     """
 
     def __init__(
@@ -226,8 +227,8 @@ class StreamEpocher:
             b1 = 0.0
         ib0 = int(round((b0 - self.tmin) * self.fs))
         ib1 = int(round((b1 - self.tmin) * self.fs))
-        if ib1 <= ib0:
-            return epoch
+        if ib1 <= ib0 or ib1 > len(epoch):
+            return epoch  # or raise/log
         base = float(epoch[ib0:ib1].mean())
         return epoch - base
 
@@ -272,17 +273,19 @@ class StreamEpocher:
                 continue  # Wait for more data for baseline
 
             # --- Full epoch processing (for running average) ---
-            full_epoch_start = event.ev_idx - self.n_pre
-            full_epoch_end = event.ev_idx + self.n_post
-            if self.rb.has_range(full_epoch_start, full_epoch_end):
-                epoch = self.rb.get_range(full_epoch_start, full_epoch_end)
-                if self._is_clean(epoch):
-                    epoch = self._baseline_correct(epoch)
-                    ra = self.running.get(event.code)
-                    if ra is None:
-                        ra = RunningAverage.init_like(self.epoch_len, alpha=0.1)
-                    ra.update(epoch)
-                    self.running[event.code] = ra
+            if not event.epoch_avg_done:
+                full_epoch_start = event.ev_idx - self.n_pre
+                full_epoch_end = event.ev_idx + self.n_post
+                if self.rb.has_range(full_epoch_start, full_epoch_end):
+                    epoch = self.rb.get_range(full_epoch_start, full_epoch_end)
+                    if self._is_clean(epoch):
+                        epoch = self._baseline_correct(epoch)
+                        ra = self.running.get(event.code)
+                        if ra is None:
+                            ra = RunningAverage.init_like(self.epoch_len, alpha=0.1)
+                        ra.update(epoch)
+                        self.running[event.code] = ra
+                    event.epoch_avg_done = True  # Mark as done
 
             # --- Per-component processing ---
             remaining_components = []
@@ -303,6 +306,14 @@ class StreamEpocher:
                 t_partial = np.arange(len(partial_epoch)) / self.fs + self.tmin
 
                 if not self._is_clean(partial_epoch):
+                    # Publish artifact skip message
+                    update = {
+                        "code": event.code,
+                        "event_idx": event.ev_idx,
+                        "component": {comp_name: {"status": "skipped_artifact"}},
+                    }
+                    if self.on_publish:
+                        self.on_publish(update)
                     continue  # Skip this component for this event
 
                 # Baseline correct and score
@@ -311,9 +322,10 @@ class StreamEpocher:
 
                 # Publish
                 ra = self.running.get(event.code)
-                n = ra.n if ra else 1
+                n = ra.n if ra else 0  # Use 0 if no running average yet
                 update = {
                     "code": event.code,
+                    "event_idx": event.ev_idx,
                     "n": n,
                     "component": {comp_name: comp_data},
                 }
@@ -322,8 +334,10 @@ class StreamEpocher:
 
             event.pending_components = remaining_components
 
-        # Clean up events with no pending components
-        self.events = [e for e in self.events if e.pending_components]
+        # Clean up events that are fully processed
+        self.events = [
+            e for e in self.events if not e.epoch_avg_done or e.pending_components
+        ]
 
 
 # ----------------------- OSC Server Wrapper -------------------
