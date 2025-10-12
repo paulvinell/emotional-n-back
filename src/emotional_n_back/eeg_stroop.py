@@ -32,10 +32,12 @@ class EEGStroopGame(SentimentStroopGame):
         initial_calibration_trials: int = 10,
         recalibration_interval: int = 10,
         outlier_std_devs: Optional[float] = 3.0,
+        erp_component: str = "P300",
         **kwargs,
     ):
         super().__init__(*args, length=None, **kwargs)
-        self.p300_threshold: Optional[float] = None  # Set after calibration
+        self.erp_component = erp_component
+        self.erp_threshold: Optional[float] = None  # Set after calibration
         self.calibration_data = []
         self.initial_calibration_trials = initial_calibration_trials
         if recalibration_interval < 2:
@@ -54,6 +56,7 @@ class EEGStroopGame(SentimentStroopGame):
             fs_fallback=fs_fallback,
             on_update=self._handle_erp_update,
             eeg_started=self.eeg_started,
+            components_to_calculate=[self.erp_component],
         )
 
         self.beep_success = make_beep(1300, 100, 0.5)
@@ -65,7 +68,7 @@ class EEGStroopGame(SentimentStroopGame):
         hdr = self.font_big.render(f"Trial {self.trial_num + 1}", True, (235, 235, 235))
         self.screen.blit(hdr, (24, 24))
 
-        if self.p300_threshold is None:
+        if self.erp_threshold is None:
             calib_text = self.font_small.render("Calibrating...", True, (255, 255, 255))
             self.screen.blit(calib_text, (24, 60))
 
@@ -78,7 +81,7 @@ class EEGStroopGame(SentimentStroopGame):
     def _handle_erp_update(self, update: dict):
         """Callback to receive ERP updates in a thread-safe manner."""
         # We are only interested in P300 for reward
-        if "P300" in update.get("component", {}):
+        if self.erp_component in update.get("component", {}):
             with self.erp_lock:
                 self.erp_updates[update["code"]] = update
 
@@ -187,27 +190,27 @@ class EEGStroopGame(SentimentStroopGame):
 
             if erp_update:
                 component = erp_update.get("component", {})
-                p300_amp = component.get("P300", {}).get("amp")
-                p300_lat = component.get("P300", {}).get("lat")
+                amp = component.get(self.erp_component, {}).get("amp")
+                lat = component.get(self.erp_component, {}).get("lat")
 
-                if p300_amp is not None and p300_lat is not None:
+                if amp is not None and lat is not None:
                     # --- Reward Determination (if we have a threshold) ---
-                    if self.p300_threshold is not None:
-                        if p300_amp > self.p300_threshold:
+                    if self.erp_threshold is not None:
+                        if amp > self.erp_threshold:
                             print(
-                                f"Success! P300 amp for {event_code}: {p300_amp:.2f} > {self.p300_threshold:.2f}"
+                                f"Success! {self.erp_component} amp for {event_code}: {amp:.2f} > {self.erp_threshold:.2f}"
                             )
                             reward = Reward.SUCCESS
                         else:
                             print(
-                                f"Failure. P300 amp for {event_code}: {p300_amp:.2f} <= {self.p300_threshold:.2f}"
+                                f"Failure. {self.erp_component} amp for {event_code}: {amp:.2f} <= {self.erp_threshold:.2f}"
                             )
                             reward = Reward.FAILURE
 
-                    self.calibration_data.append((p300_amp, p300_lat))
+                    self.calibration_data.append((amp, lat))
 
                     # --- Calibration and Recalibration ---
-                    is_initial_cal = self.p300_threshold is None
+                    is_initial_cal = self.erp_threshold is None
                     trials_needed = (
                         self.initial_calibration_trials
                         if is_initial_cal
@@ -250,10 +253,10 @@ class EEGStroopGame(SentimentStroopGame):
                                 mean_lat = np.mean(lats)
                                 std_lat = np.std(lats)
 
-                                self.p300_threshold = mean_amp  # Set threshold to mean
+                                self.erp_threshold = mean_amp  # Set threshold to mean
                                 print(
                                     f"\n--- Recalibrating ---"
-                                    f"\nNew P300 Amp Threshold: {self.p300_threshold:.2f}"
+                                    f"\nNew {self.erp_component} Amp Threshold: {self.erp_threshold:.2f}"
                                     f"\nStats (last {len(final_data)} trials):"
                                     f"  Amp: μ={mean_amp:.2f}, σ={std_amp:.2f}"
                                     f"  Lat: μ={mean_lat:.2f}, σ={std_lat:.2f}"
@@ -263,7 +266,7 @@ class EEGStroopGame(SentimentStroopGame):
                                 self.calibration_data = []
 
             # --- Reward sound and score update (only if not calibrating) ---
-            if self.p300_threshold is not None:
+            if self.erp_threshold is not None:
                 if reward == Reward.SUCCESS:
                     self.beep_success.play()
                     self.score += 1
@@ -301,7 +304,7 @@ class EEGStroopGame(SentimentStroopGame):
                 break
 
             self.trial_num += 1
-            if self.p300_threshold is not None:
+            if self.erp_threshold is not None:
                 self.scoreable_trial_num += 1
 
             # --- 6. Inter-trial Interval (ISI) ---

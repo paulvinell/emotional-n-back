@@ -111,6 +111,7 @@ class StreamEpocher:
         lp: float = 30.0,
         extra_seconds: float = 2.0,
         component_specs: Optional[List[Tuple[str, Tuple[float, float], str]]] = None,
+        components_to_calculate: Optional[List[str]] = None,
         logger: Optional[logging.Logger] = None,
         on_publish: Optional[Callable[[dict], None]] = None,
     ) -> None:
@@ -123,7 +124,10 @@ class StreamEpocher:
         self.on_publish = on_publish
 
         # Store component specs in a dict for easy lookup
-        self.component_specs = {s[0]: s for s in (component_specs or COMPONENT_SPECS)}
+        specs_to_use = component_specs or COMPONENT_SPECS
+        if components_to_calculate:
+            specs_to_use = [s for s in specs_to_use if s[0] in components_to_calculate]
+        self.component_specs = {s[0]: s for s in specs_to_use}
 
         # Buffer sized for epoch window + a safety margin
         cap = int((tmax - tmin + extra_seconds) * fs)
@@ -323,6 +327,7 @@ class OscErpServer:
         tmin: float = -0.2,
         tmax: float = 0.8,
         baseline: Tuple[Optional[float], Optional[float]] = (None, 0.0),
+        components_to_calculate: Optional[List[str]] = None,
         logger: Optional[logging.Logger] = None,
         on_update: Optional[Callable[[dict], None]] = None,
         eeg_started: Optional[threading.Event] = None,
@@ -349,6 +354,7 @@ class OscErpServer:
         self._worker = threading.Thread(target=self._work_loop, daemon=True)
 
         self._tmin, self._tmax, self._baseline = tmin, tmax, baseline
+        self._components_to_calculate = components_to_calculate
 
     def _publish_update(self, update: dict):
         print(json.dumps({"type": "erp_update", **update}), flush=True)
@@ -364,6 +370,7 @@ class OscErpServer:
                 tmax=self._tmax,
                 baseline=self._baseline,
                 on_publish=self._publish_update,
+                components_to_calculate=self._components_to_calculate,
             )
         self._q.put(lambda: self.epocher.ingest_event(code))
 
@@ -383,6 +390,7 @@ class OscErpServer:
                     tmax=self._tmax,
                     baseline=self._baseline,
                     on_publish=self._publish_update,
+                    components_to_calculate=self._components_to_calculate,
                 )
             self._q.put(lambda: self.epocher.ingest_chunk(samples))
         except Exception as e:
