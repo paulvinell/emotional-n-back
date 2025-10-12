@@ -151,7 +151,10 @@ class StreamEpocher:
         # Global sample index = number of samples ingested so far
         self.global_idx = 0
 
-        # Pending events: list of PendingEvent
+        # Pending events to be processed. These are typically markers for stimuli
+        # presented in the experiment (e.g., image onset, sound onset). Each event
+        # is tracked with its sample index, a string code, and the status of its
+        # ERP components.
         self.events: List[PendingEvent] = []
 
         # Incremental ERP per code
@@ -269,7 +272,9 @@ class StreamEpocher:
             baseline_start_idx = event.ev_idx + int(round(baseline_start_t * self.fs))
             baseline_end_idx = event.ev_idx + int(round(baseline_end_t * self.fs))
 
-            if not self.rb.has_range(baseline_start_idx, baseline_end_idx):
+            if baseline_end_idx <= baseline_start_idx or not self.rb.has_range(
+                baseline_start_idx, baseline_end_idx
+            ):
                 continue  # Wait for more data for baseline
 
             # --- Full epoch processing (for running average) ---
