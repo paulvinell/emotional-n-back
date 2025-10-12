@@ -32,6 +32,13 @@ COMPONENT_SPECS: List[Tuple[str, Tuple[float, float], str]] = [
 
 
 @dataclass
+class PendingEvent:
+    ev_idx: int
+    code: str
+    pending_components: List[str]
+
+
+@dataclass
 class RingBuffer:
     """Fixed-size ring buffer for single-channel float64 samples."""
 
@@ -122,6 +129,7 @@ class StreamEpocher:
         extra_seconds: float = 2.0,
         component_specs: Optional[List[Tuple[str, Tuple[float, float], str]]] = None,
         logger: Optional[logging.Logger] = None,
+        on_publish: Optional[Callable[[dict], None]] = None,
     ) -> None:
         assert fs > 0, "Sampling rate fs must be positive"
         self.fs = float(fs)
@@ -129,7 +137,10 @@ class StreamEpocher:
         self.tmax = float(tmax)
         self.baseline = baseline
         self.logger = logger or logging.getLogger(__name__)
-        self.component_specs = component_specs or COMPONENT_SPECS
+        self.on_publish = on_publish
+
+        # Store component specs in a dict for easy lookup
+        self.component_specs = {s[0]: s for s in (component_specs or COMPONENT_SPECS)}
 
         # Buffer sized for epoch window + a safety margin
         cap = int((tmax - tmin + extra_seconds) * fs)
@@ -139,8 +150,8 @@ class StreamEpocher:
         # Global sample index = number of samples ingested so far
         self.global_idx = 0
 
-        # Pending events: list[(global_sample_idx, code)]
-        self.events: List[Tuple[int, str]] = []
+        # Pending events: list of PendingEvent
+        self.events: List[PendingEvent] = []
 
         # Incremental ERP per code
         self.running: Dict[str, RunningAverage] = {}
@@ -158,7 +169,6 @@ class StreamEpocher:
         self.n_pre = int(round(-tmin * fs))
         self.n_post = int(round(tmax * fs))
         self.epoch_len = self.n_pre + self.n_post
-        self.t = np.arange(self.epoch_len) / fs + tmin
 
     # ------------------ ingesting data & events ------------------
 
@@ -178,6 +188,9 @@ class StreamEpocher:
         self.rb.append(y)
         self.global_idx += y.size
 
+        # After each chunk, check if any components are ready
+        self._check_and_publish_components()
+
     def ingest_event(self, code: str) -> None:
         """
         Register an event. The event is timestamped at the current end of the stream.
@@ -188,7 +201,13 @@ class StreamEpocher:
         """
         Register an event with a precise sample index.
         """
-        self.events.append((int(global_sample_idx), str(code)))
+        pending_components = list(self.component_specs.keys())
+        event = PendingEvent(
+            ev_idx=int(global_sample_idx),
+            code=str(code),
+            pending_components=pending_components,
+        )
+        self.events.append(event)
 
     # ------------------ epoching & ERP updates ------------------
 
@@ -212,75 +231,99 @@ class StreamEpocher:
         base = float(epoch[ib0:ib1].mean())
         return epoch - base
 
-    def _score_components(
-        self, erp: NDArray[np.float64]
-    ) -> Dict[str, Dict[str, float]]:
-        out: Dict[str, Dict[str, float]] = {}
-        for name, (w0, w1), pol in self.component_specs:
-            m = (self.t >= w0) & (self.t <= w1)
-            if not m.any():
-                out[name] = {"amp": float("nan"), "lat": float("nan")}
-                continue
-            seg = erp[m]
-            tt = self.t[m]
-            if pol == "pos":
-                i = int(np.argmax(seg))
-                amp = float(seg[i])
-                lat = float(tt[i])
-            elif pol == "neg":
-                i = int(np.argmin(seg))
-                amp = float(seg[i])
-                lat = float(tt[i])
-            else:  # pos_mean == LPP style
-                amp = float(seg.mean())
-                lat = float((tt[0] + tt[-1]) / 2.0)
-            out[name] = {"amp": amp, "lat": lat}
-        return out
+    def _score_component(
+        self, erp: NDArray[np.float64], name: str, t: NDArray[np.float64]
+    ) -> Dict[str, float]:
+        """Scores a single component from a (potentially partial) epoch."""
+        _, (w0, w1), pol = self.component_specs[name]
+        m = (t >= w0) & (t <= w1)
+        if not m.any():
+            return {"amp": float("nan"), "lat": float("nan")}
 
-    def materialize_one_ready_epoch(
-        self,
-    ) -> Optional[List[Dict[str, Union[str, int, Dict[str, Dict[str, float]]]]]]:
+        seg = erp[m]
+        tt = t[m]
+        if pol == "pos":
+            i = int(np.argmax(seg))
+            amp, lat = float(seg[i]), float(tt[i])
+        elif pol == "neg":
+            i = int(np.argmin(seg))
+            amp, lat = float(seg[i]), float(tt[i])
+        else:  # pos_mean
+            amp = float(seg.mean())
+            lat = float((tt[0] + tt[-1]) / 2.0)
+        return {"amp": amp, "lat": lat}
+
+    def _check_and_publish_components(self) -> None:
         """
-        Try to realize the single earliest epoch whose window is now available.
-        If realized, update the running ERP and return a summary dict.
+        Check all pending events and publish any components that have become ready.
         """
         # Sort events by timestamp to ensure we process the earliest one first
-        sorted_events = sorted(self.events, key=lambda x: x[0])
+        self.events.sort(key=lambda e: e.ev_idx)
 
-        for ev_idx, code in sorted_events:
-            start = ev_idx - self.n_pre
-            end = ev_idx + self.n_post
-            if start < 0:
-                continue
+        for event in self.events:
+            # Baseline window must be available
+            b0, b1 = self.baseline
+            baseline_start_t = b0 if b0 is not None else self.tmin
+            baseline_end_t = b1 if b1 is not None else 0.0
+            baseline_start_idx = event.ev_idx + int(round(baseline_start_t * self.fs))
+            baseline_end_idx = event.ev_idx + int(round(baseline_end_t * self.fs))
 
-            if self.rb.has_range(start, end):
-                epoch = self.rb.get_range(start, end)
+            if not self.rb.has_range(baseline_start_idx, baseline_end_idx):
+                continue  # Wait for more data for baseline
 
-                if not self._is_clean(epoch):
-                    self.events.remove((ev_idx, code))
-                    continue  # Try the next event
+            # --- Full epoch processing (for running average) ---
+            full_epoch_start = event.ev_idx - self.n_pre
+            full_epoch_end = event.ev_idx + self.n_post
+            if self.rb.has_range(full_epoch_start, full_epoch_end):
+                epoch = self.rb.get_range(full_epoch_start, full_epoch_end)
+                if self._is_clean(epoch):
+                    epoch = self._baseline_correct(epoch)
+                    ra = self.running.get(event.code)
+                    if ra is None:
+                        ra = RunningAverage.init_like(self.epoch_len, alpha=0.1)
+                    ra.update(epoch)
+                    self.running[event.code] = ra
 
-                epoch = self._baseline_correct(epoch)
+            # --- Per-component processing ---
+            remaining_components = []
+            for comp_name in event.pending_components:
+                spec = self.component_specs[comp_name]
+                _, (w0, w1), _ = spec
 
-                ra = self.running.get(code)
-                if ra is None:
-                    ra = RunningAverage.init_like(self.epoch_len, alpha=0.1)
-                ra.update(epoch)
-                self.running[code] = ra
+                # Determine required window for this component
+                epoch_start = event.ev_idx - self.n_pre
+                comp_end_idx = event.ev_idx + int(round(w1 * self.fs))
 
-                comps = self._score_components(ra.avg)
-                updates = []
-                for comp_name, comp_data in comps.items():
-                    update = {
-                        "code": code,
-                        "n": ra.n,
-                        "component": {comp_name: comp_data},
-                    }
-                    updates.append(update)
-                self.events.remove((ev_idx, code))
-                return updates  # Return a list of updates
+                if not self.rb.has_range(epoch_start, comp_end_idx):
+                    remaining_components.append(comp_name)
+                    continue  # Not ready yet
 
-        return None
+                # Extract partial epoch
+                partial_epoch = self.rb.get_range(epoch_start, comp_end_idx)
+                t_partial = np.arange(len(partial_epoch)) / self.fs + self.tmin
+
+                if not self._is_clean(partial_epoch):
+                    continue  # Skip this component for this event
+
+                # Baseline correct and score
+                partial_epoch = self._baseline_correct(partial_epoch)
+                comp_data = self._score_component(partial_epoch, comp_name, t_partial)
+
+                # Publish
+                ra = self.running.get(event.code)
+                n = ra.n if ra else 1
+                update = {
+                    "code": event.code,
+                    "n": n,
+                    "component": {comp_name: comp_data},
+                }
+                if self.on_publish:
+                    self.on_publish(update)
+
+            event.pending_components = remaining_components
+
+        # Clean up events with no pending components
+        self.events = [e for e in self.events if e.pending_components]
 
 
 # ----------------------- OSC Server Wrapper -------------------
@@ -329,6 +372,11 @@ class OscErpServer:
 
         self._tmin, self._tmax, self._baseline = tmin, tmax, baseline
 
+    def _publish_update(self, update: dict):
+        print(json.dumps({"type": "erp_update", **update}), flush=True)
+        if self.on_update:
+            self.on_update(update)
+
     def ingest_event(self, code: str):
         """Ingest an event from within the same process."""
         if self.epocher is None:
@@ -337,6 +385,7 @@ class OscErpServer:
                 tmin=self._tmin,
                 tmax=self._tmax,
                 baseline=self._baseline,
+                on_publish=self._publish_update,
             )
         self._q.put(lambda: self.epocher.ingest_event(code))
 
@@ -351,7 +400,11 @@ class OscErpServer:
 
             if self.epocher is None:
                 self.epocher = StreamEpocher(
-                    fs=self._fs_hint, tmin=self._tmin, tmax=self._tmax, baseline=self._baseline
+                    fs=self._fs_hint,
+                    tmin=self._tmin,
+                    tmax=self._tmax,
+                    baseline=self._baseline,
+                    on_publish=self._publish_update,
                 )
             self._q.put(lambda: self.epocher.ingest_chunk(samples))
         except Exception as e:
@@ -364,8 +417,7 @@ class OscErpServer:
         Data-driven worker loop.
         - Blocks waiting for data/events from the queue.
         - Processes all available items.
-        - Materializes any epochs that are now ready.
-        This avoids polling and unnecessary sleeps.
+        - Component publication is triggered by the StreamEpocher itself.
         """
         while True:
             try:
@@ -383,21 +435,6 @@ class OscErpServer:
 
             except Exception as e:
                 self.logger.exception("Worker error processing queue: %s", e)
-                continue
-
-            # After processing a batch of ingestions, materialize and publish all ready epochs
-            if self.epocher is not None:
-                try:
-                    while True:
-                        updates = self.epocher.materialize_one_ready_epoch()
-                        if updates is None:
-                            break  # No more ready epochs
-                        for update in updates:
-                            print(json.dumps({"type": "erp_update", **update}), flush=True)
-                            if self.on_update:
-                                self.on_update(update)
-                except Exception as e:
-                    self.logger.exception("Worker error materializing epochs: %s", e)
 
     def start(self):
         self._thread.start()
