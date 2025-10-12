@@ -31,13 +31,17 @@ class EEGStroopGame(SentimentStroopGame):
         fs_fallback: float = 256.0,
         initial_calibration_trials: int = 10,
         recalibration_interval: int = 10,
+        outlier_std_devs: Optional[float] = 3.0,
         **kwargs,
     ):
         super().__init__(*args, length=None, **kwargs)
         self.p300_threshold: Optional[float] = None  # Set after calibration
         self.calibration_data = []
         self.initial_calibration_trials = initial_calibration_trials
+        if recalibration_interval < 2:
+            raise ValueError("recalibration_interval must be at least 2")
         self.recalibration_interval = recalibration_interval
+        self.outlier_std_devs = outlier_std_devs
 
         # Thread-safe mechanism for ERP updates
         self.erp_updates = {}
@@ -213,23 +217,50 @@ class EEGStroopGame(SentimentStroopGame):
 
                     if is_calibration_time:
                         if self.calibration_data:
-                            amps, lats = zip(*self.calibration_data)
-                            mean_amp = np.mean(amps)
-                            std_amp = np.std(amps)
-                            mean_lat = np.mean(lats)
-                            std_lat = np.std(lats)
+                            mean_amp = np.mean([d[0] for d in self.calibration_data])
+                            std_amp = np.std([d[0] for d in self.calibration_data])
 
-                            self.p300_threshold = mean_amp  # Set threshold to mean
-                            print(
-                                f"\n--- Recalibrating ---"
-                                f"\nNew P300 Amp Threshold: {self.p300_threshold:.2f}"
-                                f"\nStats (last {len(self.calibration_data)} trials):"
-                                f"  Amp: μ={mean_amp:.2f}, σ={std_amp:.2f}"
-                                f"  Lat: μ={mean_lat:.2f}, σ={std_lat:.2f}"
-                                f"\n---------------------"
-                            )
-                            # Reset for the next batch
-                            self.calibration_data = []
+                            if self.outlier_std_devs is not None:
+                                filtered_data = [
+                                    d
+                                    for d in self.calibration_data
+                                    if abs(d[0] - mean_amp)
+                                    <= self.outlier_std_devs * std_amp
+                                ]
+                            else:
+                                filtered_data = self.calibration_data
+
+                            if (
+                                len(filtered_data) < 2
+                                and len(self.calibration_data) >= 2
+                            ):
+                                deviations = [
+                                    (d, abs(d[0] - mean_amp))
+                                    for d in self.calibration_data
+                                ]
+                                deviations.sort(key=lambda x: x[1])
+                                final_data = [d[0] for d in deviations[:2]]
+                            else:
+                                final_data = filtered_data
+
+                            if final_data:
+                                amps, lats = zip(*final_data)
+                                mean_amp = np.mean(amps)
+                                std_amp = np.std(amps)
+                                mean_lat = np.mean(lats)
+                                std_lat = np.std(lats)
+
+                                self.p300_threshold = mean_amp  # Set threshold to mean
+                                print(
+                                    f"\n--- Recalibrating ---"
+                                    f"\nNew P300 Amp Threshold: {self.p300_threshold:.2f}"
+                                    f"\nStats (last {len(final_data)} trials):"
+                                    f"  Amp: μ={mean_amp:.2f}, σ={std_amp:.2f}"
+                                    f"  Lat: μ={mean_lat:.2f}, σ={std_lat:.2f}"
+                                    f"\n---------------------"
+                                )
+                                # Reset for the next batch
+                                self.calibration_data = []
 
             # --- Reward sound and score update (only if not calibrating) ---
             if self.p300_threshold is not None:
