@@ -36,7 +36,6 @@ class PendingEvent:
     ev_idx: int
     code: str
     pending_components: List[str]
-    epoch_avg_done: bool = False
 
 
 @dataclass
@@ -85,24 +84,7 @@ class RingBuffer:
         return out
 
 
-@dataclass
-class RunningAverage:
-    """Incremental mean for ERP updates (1-D)."""
 
-    alpha: float
-    avg: np.ndarray
-    n: int = 0
-
-    @classmethod
-    def init_like(cls, length, alpha=0.1) -> "RunningAverage":
-        return cls(alpha=alpha, avg=np.zeros(length))
-
-    def update(self, x: np.ndarray) -> None:
-        self.n += 1
-        if self.n == 1:
-            self.avg = x.copy()
-        else:
-            self.avg += self.alpha * (x - self.avg)
 
 
 # ----------------------- Stream Epocher ----------------------
@@ -156,9 +138,6 @@ class StreamEpocher:
         # is tracked with its sample index, a string code, and the status of its
         # ERP components.
         self.events: List[PendingEvent] = []
-
-        # Incremental ERP per code
-        self.running: Dict[str, RunningAverage] = {}
 
         # Pre-compute filters
         nyq = max(fs / 2.0, 1.0)
@@ -277,21 +256,6 @@ class StreamEpocher:
             ):
                 continue  # Wait for more data for baseline
 
-            # --- Full epoch processing (for running average) ---
-            if not event.epoch_avg_done:
-                full_epoch_start = event.ev_idx - self.n_pre
-                full_epoch_end = event.ev_idx + self.n_post
-                if self.rb.has_range(full_epoch_start, full_epoch_end):
-                    epoch = self.rb.get_range(full_epoch_start, full_epoch_end)
-                    if self._is_clean(epoch):
-                        epoch = self._baseline_correct(epoch)
-                        ra = self.running.get(event.code)
-                        if ra is None:
-                            ra = RunningAverage.init_like(self.epoch_len, alpha=0.1)
-                        ra.update(epoch)
-                        self.running[event.code] = ra
-                    event.epoch_avg_done = True  # Mark as done
-
             # --- Per-component processing ---
             remaining_components = []
             for comp_name in event.pending_components:
@@ -326,12 +290,9 @@ class StreamEpocher:
                 comp_data = self._score_component(partial_epoch, comp_name, t_partial)
 
                 # Publish
-                ra = self.running.get(event.code)
-                n = ra.n if ra else 0  # Use 0 if no running average yet
                 update = {
                     "code": event.code,
                     "event_idx": event.ev_idx,
-                    "n": n,
                     "component": {comp_name: comp_data},
                 }
                 if self.on_publish:
@@ -339,10 +300,8 @@ class StreamEpocher:
 
             event.pending_components = remaining_components
 
-        # Clean up events that are fully processed
-        self.events = [
-            e for e in self.events if not e.epoch_avg_done or e.pending_components
-        ]
+        # Clean up events with no pending components
+        self.events = [e for e in self.events if e.pending_components]
 
 
 # ----------------------- OSC Server Wrapper -------------------
