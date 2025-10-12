@@ -1,7 +1,6 @@
 # erp_stream.py
 # Single-channel OSC → online ERP extraction (P1/N1/N200/P300/LPP)
 # Robust to missing fs, chunk overlap/gaps, and unaligned event timing.
-# MIT License.
 
 from __future__ import annotations
 
@@ -11,7 +10,7 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Deque, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
@@ -36,6 +35,7 @@ class PendingEvent:
     ev_idx: int
     code: str
     pending_components: List[str]
+    base_metrics: Optional[Tuple[float, float]] = None
 
 
 @dataclass
@@ -84,9 +84,6 @@ class RingBuffer:
         return out
 
 
-
-
-
 # ----------------------- Stream Epocher ----------------------
 
 
@@ -114,6 +111,9 @@ class StreamEpocher:
         components_to_calculate: Optional[List[str]] = None,
         logger: Optional[logging.Logger] = None,
         on_publish: Optional[Callable[[dict], None]] = None,
+        use_advanced_artifact_detection: bool = True,
+        blink_threshold_mult: Tuple[float, float] = (10.0, 7.0),
+        emg_threshold_mult: Tuple[float, float] = (8.0, 5.0),
     ) -> None:
         assert fs > 0, "Sampling rate fs must be positive"
         self.fs = float(fs)
@@ -122,6 +122,11 @@ class StreamEpocher:
         self.baseline = baseline
         self.logger = logger or logging.getLogger(__name__)
         self.on_publish = on_publish
+        self.use_advanced_artifact_detection = use_advanced_artifact_detection
+        self.blink_threshold_mult_high, self.blink_threshold_mult_low = (
+            blink_threshold_mult
+        )
+        self.emg_threshold_mult_high, self.emg_threshold_mult_low = emg_threshold_mult
 
         # Store component specs in a dict for easy lookup
         specs_to_use = component_specs or COMPONENT_SPECS
@@ -137,10 +142,7 @@ class StreamEpocher:
         # Global sample index = number of samples ingested so far
         self.global_idx = 0
 
-        # Pending events to be processed. These are typically markers for stimuli
-        # presented in the experiment (e.g., image onset, sound onset). Each event
-        # is tracked with its sample index, a string code, and the status of its
-        # ERP components.
+        # Pending events to be processed
         self.events: List[PendingEvent] = []
 
         # Pre-compute filters
@@ -152,10 +154,74 @@ class StreamEpocher:
         self.sos = butter(4, [low, high], btype="band", output="sos")
         self.filt_zi = np.zeros((self.sos.shape[0], 2))
 
+        if self.use_advanced_artifact_detection:
+            self.sos_blink = butter(
+                2, [max(0.1, 0.5) / nyq, 6.0 / nyq], btype="band", output="sos"
+            )
+            self.zi_blink = np.zeros((self.sos_blink.shape[0], 2))
+            lo_emg = 20.0 / nyq
+            hi_emg = min(70.0, nyq - 1e-6) / nyq
+            self.sos_emg = butter(2, [lo_emg, hi_emg], btype="band", output="sos")
+            self.zi_emg = np.zeros((self.sos_emg.shape[0], 2))
+
         # Epoch time base (constant length)
         self.n_pre = int(round(-tmin * fs))
         self.n_post = int(round(tmax * fs))
         self.epoch_len = self.n_pre + self.n_post
+
+    # ------------------ new artifact detection helpers ------------------
+
+    def _baseline_indices(self, ev_idx):
+        b0 = self.baseline[0] if self.baseline[0] is not None else self.tmin
+        b1 = self.baseline[1] if self.baseline[1] is not None else 0.0
+        i0 = ev_idx + int(round(b0 * self.fs))
+        i1 = ev_idx + int(round(b1 * self.fs))
+        return i0, i1
+
+    def _baseline_metrics(self, i0, i1):
+        if not self.rb.has_range(i0, i1) or (i1 - i0) < int(0.12 * self.fs):
+            return None  # not enough baseline to judge
+        base_raw = self.rb.get_range(i0, i1)
+        bb = sosfilt(self.sos_blink, base_raw.copy())
+        ee = sosfilt(self.sos_emg, base_raw.copy())
+        mad_low = 1.4826 * np.median(np.abs(bb - np.median(bb))) + 1e-6
+        w = max(1, int(0.05 * self.fs))
+        if len(ee) < w:
+            return None
+        rms = np.sqrt(np.convolve(ee**2, np.ones(w) / w, mode="valid"))
+        med_rms = np.median(rms) + 1e-6
+        return mad_low, med_rms
+
+    def _blink_exceeds(self, y_blink, thr):
+        w = max(1, int(0.03 * self.fs))  # ~30 ms
+        if len(y_blink) < w:
+            return False
+        env = np.convolve(np.abs(y_blink), np.ones(w) / w, mode="same")
+        return bool(np.any(env > thr))
+
+    def _emg_exceeds(self, y_emg, base_med_rms, mult):
+        w = max(1, int(0.08 * self.fs))  # ~80 ms
+        if len(y_emg) < w:
+            return False
+        rms = np.sqrt(np.convolve(y_emg**2, np.ones(w) / w, mode="same"))
+        thr = mult * base_med_rms
+        above = rms > thr
+        # ≥40 ms continuous above-threshold
+        k = max(1, int(0.04 * self.fs))
+        if len(above) < k:
+            return False
+        return bool(
+            np.any(np.convolve(above.astype(int), np.ones(k), mode="same") >= k)
+        )
+
+    def _artifact_ratios(self, y_blink, y_emg, mad_low, med_rms):
+        w_b = max(1, int(0.03 * self.fs))
+        env_b = np.convolve(np.abs(y_blink), np.ones(w_b) / w_b, mode="same")
+        w_e = max(1, int(0.08 * self.fs))
+        rms_e = np.sqrt(np.convolve(y_emg**2, np.ones(w_e) / w_e, mode="same"))
+        return float(env_b.max() / (mad_low + 1e-6)), float(
+            rms_e.max() / (med_rms + 1e-6)
+        )
 
     # ------------------ ingesting data & events ------------------
 
@@ -170,10 +236,14 @@ class StreamEpocher:
         if x.ndim != 1:
             raise ValueError("Samples must be a 1-D array")
 
+        # Main ERP-band filtering
         y, self.filt_zi = sosfilt(self.sos, x, zi=self.filt_zi)
-
         self.rb.append(y)
         self.global_idx += y.size
+
+        if self.use_advanced_artifact_detection:
+            # Artifact detection is now handled per-event in _check_and_publish_components
+            pass
 
         # After each chunk, check if any components are ready
         self._check_and_publish_components()
@@ -198,10 +268,15 @@ class StreamEpocher:
 
     # ------------------ epoching & ERP updates ------------------
 
-    def _is_clean(self, epoch, p2p_thresh=150.0, slope_thresh=75.0):
-        if np.ptp(epoch) > p2p_thresh:  # large blink/motion
+    def _is_clean(self, epoch, fs, ptp_k=10.0, slope_k=10.0):
+        # Robust baseline variability
+        mad = 1.4826 * np.median(np.abs(epoch - np.median(epoch))) + 1e-6
+        if np.ptp(epoch) > ptp_k * mad:
             return False
-        if np.max(np.abs(np.diff(epoch))) > slope_thresh:  # EMG burst
+        # Convert to μV/s
+        max_slope_uv_per_s = np.max(np.abs(np.diff(epoch))) * fs
+        slope_thresh = slope_k * (mad / 0.1)  # heuristic: ~mad per 100 ms
+        if max_slope_uv_per_s > slope_thresh:
             return False
         return True
 
@@ -244,59 +319,151 @@ class StreamEpocher:
         """
         Check all pending events and publish any components that have become ready.
         """
-        # Sort events by timestamp to ensure we process the earliest one first
         self.events.sort(key=lambda e: e.ev_idx)
 
         for event in self.events:
-            # Baseline window must be available
-            b0, b1 = self.baseline
-            baseline_start_t = b0 if b0 is not None else self.tmin
-            baseline_end_t = b1 if b1 is not None else 0.0
-            baseline_start_idx = event.ev_idx + int(round(baseline_start_t * self.fs))
-            baseline_end_idx = event.ev_idx + int(round(baseline_end_t * self.fs))
+            if event.base_metrics is None and self.use_advanced_artifact_detection:
+                i0, i1 = self._baseline_indices(event.ev_idx)
+                event.base_metrics = self._baseline_metrics(i0, i1)
 
-            if baseline_end_idx <= baseline_start_idx or not self.rb.has_range(
-                baseline_start_idx, baseline_end_idx
-            ):
-                continue  # Wait for more data for baseline
+            # --- 1. Event-level artifact processing (if enabled) ---
+            event_clean_flag: Union[str, bool] = "unknown"
+            if self.use_advanced_artifact_detection:
+                base_metrics = event.base_metrics
+                if base_metrics is None:
+                    event_clean_flag = "unknown"
+                else:
+                    mad_low, med_rms = base_metrics
+                    i0, i1 = self._baseline_indices(event.ev_idx)
 
-            # --- Per-component processing ---
+                    # Final baseline check for event-level flag
+                    # A) Baseline-only detection, no pad/back-contamination
+                    base_raw = self.rb.get_range(i0, i1)
+                    bb = sosfilt(self.sos_blink, base_raw.copy())
+                    ee = sosfilt(self.sos_emg, base_raw.copy())
+
+                    trim = int(0.05 * self.fs)  # ~50 ms
+                    if len(bb) > 2 * trim:
+                        bb = bb[trim:-trim]
+                    if len(ee) > 2 * trim:
+                        ee = ee[trim:-trim]
+
+                    # Blink baseline check with persistence (no pads applied beyond the baseline slice itself)
+                    w_b = max(1, int(0.03 * self.fs))
+                    env_b = np.convolve(np.abs(bb), np.ones(w_b) / w_b, mode="same")
+                    blink_in_baseline = bool(
+                        np.any(env_b > self.blink_threshold_mult_high * mad_low)
+                    )
+
+                    # EMG baseline check with persistence
+                    w_e = max(1, int(0.08 * self.fs))
+                    rms_e = np.sqrt(np.convolve(ee**2, np.ones(w_e) / w_e, mode="same"))
+                    thr_e = self.emg_threshold_mult_high * med_rms
+                    above_e = rms_e > thr_e
+                    k = max(1, int(0.04 * self.fs))  # ≥40 ms continuous
+                    emg_in_baseline = bool(
+                        len(above_e) >= k
+                        and np.any(
+                            np.convolve(above_e.astype(int), np.ones(k), "same") >= k
+                        )
+                    )
+
+                    # Decide baseline clean WITHOUT using artifact_events pads
+                    event_clean_flag = not (blink_in_baseline or emg_in_baseline)
+
+            # --- 2. Per-component processing ---
             remaining_components = []
             for comp_name in event.pending_components:
                 spec = self.component_specs[comp_name]
                 _, (w0, w1), _ = spec
-
-                # Determine required window for this component
-                epoch_start = event.ev_idx - self.n_pre
                 comp_end_idx = event.ev_idx + int(round(w1 * self.fs))
 
-                if not self.rb.has_range(epoch_start, comp_end_idx):
+                if not self.rb.has_range(event.ev_idx - self.n_pre, comp_end_idx):
                     remaining_components.append(comp_name)
-                    continue  # Not ready yet
+                    continue
 
-                # Extract partial epoch
-                partial_epoch = self.rb.get_range(epoch_start, comp_end_idx)
-                t_partial = np.arange(len(partial_epoch)) / self.fs + self.tmin
+                # Determine cleanliness for this component
+                is_clean = True
+                reason = None
+                final_clean_flag = event_clean_flag
 
-                if not self._is_clean(partial_epoch):
-                    # Publish artifact skip message
-                    update = {
-                        "code": event.code,
-                        "event_idx": event.ev_idx,
-                        "component": {comp_name: {"status": "skipped_artifact"}},
+                if self.use_advanced_artifact_detection:
+                    if event_clean_flag == "unknown":
+                        is_clean = False
+                        reason = "baseline_unavailable"
+                        final_clean_flag = False
+                    elif event_clean_flag is False:
+                        is_clean = False
+                        reason = "baseline_contaminated"
+                    elif event_clean_flag is True:
+                        # Direct component window artifact detection
+                        comp_start_idx = event.ev_idx + int(round(w0 * self.fs))
+                        comp_end_idx = event.ev_idx + int(round(w1 * self.fs))
+
+                        min_len = max(int(0.12 * self.fs), 1)  # ~120 ms
+                        if (comp_end_idx - comp_start_idx) < min_len:
+                            is_clean = False
+                            reason = "component_window_too_short"
+                            final_clean_flag = "unknown"
+
+                        elif self.rb.has_range(comp_start_idx, comp_end_idx):
+                            comp_raw = self.rb.get_range(comp_start_idx, comp_end_idx)
+                            base_metrics = event.base_metrics
+                            if base_metrics is not None:
+                                mad_low, med_rms = base_metrics
+                                y_blink = sosfilt(self.sos_blink, comp_raw)
+                                y_emg = sosfilt(self.sos_emg, comp_raw)
+                                if self._blink_exceeds(
+                                    y_blink, self.blink_threshold_mult_low * mad_low
+                                ) or self._emg_exceeds(
+                                    y_emg, med_rms, self.emg_threshold_mult_low
+                                ):
+                                    is_clean = False
+                                    reason = "component_window_contaminated"
+                                    final_clean_flag = False
+                else:  # Fallback
+                    epoch = self.rb.get_range(event.ev_idx - self.n_pre, comp_end_idx)
+                    if not self._is_clean(epoch, self.fs):
+                        is_clean = False
+                        reason = "threshold_exceeded"
+                        final_clean_flag = False
+
+                # Always score the component
+                epoch_all = self.rb.get_range(event.ev_idx - self.n_pre, comp_end_idx)
+                t_epoch = np.arange(len(epoch_all)) / self.fs + self.tmin
+                epoch = self._baseline_correct(epoch_all)
+                comp_data = self._score_component(epoch, comp_name, t_epoch)
+
+                if not is_clean:
+                    comp_data["error"] = {
+                        "status": "artifact_detected",
+                        "reason": reason,
                     }
-                    if self.on_publish:
-                        self.on_publish(update)
-                    continue  # Skip this component for this event
+                    if reason == "baseline_contaminated" and event.base_metrics:
+                        mad_low, med_rms = event.base_metrics
+                        base_raw = self.rb.get_range(
+                            *self._baseline_indices(event.ev_idx)
+                        )
+                        bb = sosfilt(self.sos_blink, base_raw.copy())
+                        ee = sosfilt(self.sos_emg, base_raw.copy())
+                        b_ratio, e_ratio = self._artifact_ratios(
+                            bb, ee, mad_low, med_rms
+                        )
+                        comp_data["error"]["blink_ratio"] = b_ratio
+                        comp_data["error"]["emg_ratio"] = e_ratio
 
-                # Baseline correct and score
-                partial_epoch = self._baseline_correct(partial_epoch)
-                comp_data = self._score_component(partial_epoch, comp_name, t_partial)
+                    if reason == "component_window_contaminated" and event.base_metrics:
+                        mad_low, med_rms = event.base_metrics
+                        b_ratio, e_ratio = self._artifact_ratios(
+                            y_blink, y_emg, mad_low, med_rms
+                        )
+                        comp_data["error"]["blink_ratio"] = b_ratio
+                        comp_data["error"]["emg_ratio"] = e_ratio
 
-                # Publish
                 update = {
                     "code": event.code,
                     "event_idx": event.ev_idx,
+                    "clean": final_clean_flag,
                     "component": {comp_name: comp_data},
                 }
                 if self.on_publish:
@@ -304,7 +471,6 @@ class StreamEpocher:
 
             event.pending_components = remaining_components
 
-        # Clean up events with no pending components
         self.events = [e for e in self.events if e.pending_components]
 
 
