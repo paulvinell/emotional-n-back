@@ -27,6 +27,15 @@ COMPONENT_SPECS: List[Tuple[str, Tuple[float, float], str]] = [
     ("LPP", (0.400, 0.800), "pos_mean"),  # mean amplitude over the window
 ]
 
+# Component scoring filter bands (Hz)
+COMPONENT_SCORING_SPECS = {
+    "P1": (1.0, 20.0),
+    "N1": (1.0, 20.0),
+    "N200": (1.0, 12.0),
+    "P300": (0.1, 12.0),
+    "LPP": (0.1, 8.0),
+}
+
 # ----------------------- Utilities ---------------------------
 
 
@@ -111,7 +120,7 @@ class StreamEpocher:
         components_to_calculate: Optional[List[str]] = None,
         logger: Optional[logging.Logger] = None,
         on_publish: Optional[Callable[[dict], None]] = None,
-        use_advanced_artifact_detection: bool = True,
+        use_artifact_detection: bool = True,
         blink_threshold_mult: Tuple[float, float] = (10.0, 7.0),
         emg_threshold_mult: Tuple[float, float] = (8.0, 5.0),
     ) -> None:
@@ -122,7 +131,7 @@ class StreamEpocher:
         self.baseline = baseline
         self.logger = logger or logging.getLogger(__name__)
         self.on_publish = on_publish
-        self.use_advanced_artifact_detection = use_advanced_artifact_detection
+        self.use_artifact_detection = use_artifact_detection
         self.blink_threshold_mult_high, self.blink_threshold_mult_low = (
             blink_threshold_mult
         )
@@ -133,6 +142,17 @@ class StreamEpocher:
         if components_to_calculate:
             specs_to_use = [s for s in specs_to_use if s[0] in components_to_calculate]
         self.component_specs = {s[0]: s for s in specs_to_use}
+
+        # Pre-compute scoring filters
+        self.scoring_filters = {}
+        for comp_name, (low, high) in COMPONENT_SCORING_SPECS.items():
+            if comp_name in self.component_specs:
+                nyq = max(self.fs / 2.0, 1.0)
+                l, h = max(low, 0.01) / nyq, min(high, nyq - 1e-6) / nyq
+                if 0 < l < h < 1:
+                    self.scoring_filters[comp_name] = butter(
+                        2, [l, h], btype="band", output="sos"
+                    )
 
         # Buffer sized for epoch window + a safety margin
         cap = int((tmax - tmin + extra_seconds) * fs)
@@ -154,7 +174,7 @@ class StreamEpocher:
         self.sos = butter(4, [low, high], btype="band", output="sos")
         self.filt_zi = np.zeros((self.sos.shape[0], 2))
 
-        if self.use_advanced_artifact_detection:
+        if self.use_artifact_detection:
             self.sos_blink = butter(
                 2, [max(0.1, 0.5) / nyq, 6.0 / nyq], btype="band", output="sos"
             )
@@ -241,10 +261,6 @@ class StreamEpocher:
         self.rb.append(y)
         self.global_idx += y.size
 
-        if self.use_advanced_artifact_detection:
-            # Artifact detection is now handled per-event in _check_and_publish_components
-            pass
-
         # After each chunk, check if any components are ready
         self._check_and_publish_components()
 
@@ -267,18 +283,6 @@ class StreamEpocher:
         self.events.append(event)
 
     # ------------------ epoching & ERP updates ------------------
-
-    def _is_clean(self, epoch, fs, ptp_k=10.0, slope_k=10.0):
-        # Robust baseline variability
-        mad = 1.4826 * np.median(np.abs(epoch - np.median(epoch))) + 1e-6
-        if np.ptp(epoch) > ptp_k * mad:
-            return False
-        # Convert to μV/s
-        max_slope_uv_per_s = np.max(np.abs(np.diff(epoch))) * fs
-        slope_thresh = slope_k * (mad / 0.1)  # heuristic: ~mad per 100 ms
-        if max_slope_uv_per_s > slope_thresh:
-            return False
-        return True
 
     def _baseline_correct(self, epoch: NDArray[np.float64]) -> NDArray[np.float64]:
         b0, b1 = self.baseline
@@ -322,13 +326,13 @@ class StreamEpocher:
         self.events.sort(key=lambda e: e.ev_idx)
 
         for event in self.events:
-            if event.base_metrics is None and self.use_advanced_artifact_detection:
+            if event.base_metrics is None and self.use_artifact_detection:
                 i0, i1 = self._baseline_indices(event.ev_idx)
                 event.base_metrics = self._baseline_metrics(i0, i1)
 
             # --- 1. Event-level artifact processing (if enabled) ---
-            event_clean_flag: Union[str, bool] = "unknown"
-            if self.use_advanced_artifact_detection:
+            event_clean_flag: Union[str, bool] = True
+            if self.use_artifact_detection:
                 base_metrics = event.base_metrics
                 if base_metrics is None:
                     event_clean_flag = "unknown"
@@ -387,7 +391,7 @@ class StreamEpocher:
                 reason = None
                 final_clean_flag = event_clean_flag
 
-                if self.use_advanced_artifact_detection:
+                if self.use_artifact_detection:
                     if event_clean_flag == "unknown":
                         is_clean = False
                         reason = "baseline_unavailable"
@@ -421,18 +425,19 @@ class StreamEpocher:
                                     is_clean = False
                                     reason = "component_window_contaminated"
                                     final_clean_flag = False
-                else:  # Fallback
-                    epoch = self.rb.get_range(event.ev_idx - self.n_pre, comp_end_idx)
-                    if not self._is_clean(epoch, self.fs):
-                        is_clean = False
-                        reason = "threshold_exceeded"
-                        final_clean_flag = False
 
                 # Always score the component
                 epoch_all = self.rb.get_range(event.ev_idx - self.n_pre, comp_end_idx)
                 t_epoch = np.arange(len(epoch_all)) / self.fs + self.tmin
                 epoch = self._baseline_correct(epoch_all)
-                comp_data = self._score_component(epoch, comp_name, t_epoch)
+
+                # Apply component-specific scoring filter if available
+                if comp_name in self.scoring_filters:
+                    scoring_epoch = sosfilt(self.scoring_filters[comp_name], epoch)
+                else:
+                    scoring_epoch = epoch
+
+                comp_data = self._score_component(scoring_epoch, comp_name, t_epoch)
 
                 if not is_clean:
                     comp_data["error"] = {
