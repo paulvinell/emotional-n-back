@@ -4,7 +4,7 @@ import shutil
 import typer
 
 from emotional_n_back.constants import DATA_DIR
-from emotional_n_back.games.eeg.eeg_stroop import EEGStroopGame
+from emotional_n_back.games.eeg.eeg_stroop.game import EEGStroopGame
 from emotional_n_back.games.game import (
     AudioNBackGame,
     AudioSentimentNBackGame,
