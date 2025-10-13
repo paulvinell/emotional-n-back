@@ -1,9 +1,9 @@
 import time
-from pythonosc.udp_client import SimpleUDPClient
+from .base import BaseStreamer
 
-class EEGStreamer:
+class EEGStreamer(BaseStreamer):
     def __init__(self, ip, port, address, fs, duration, seed, rate_per_sec, dur_range, amp_range):
-        self.client = SimpleUDPClient(ip, port)
+        super().__init__(ip, port)
         self.address = address
         self.fs = fs
         self.duration = duration
@@ -12,7 +12,7 @@ class EEGStreamer:
         self.dur_range = dur_range
         self.amp_range = amp_range
 
-    def start(self):
+    def stream(self):
         print("Starting EEG generator...")
         # This is a dummy implementation. 
         # The original file was overwritten.

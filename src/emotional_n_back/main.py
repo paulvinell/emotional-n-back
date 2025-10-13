@@ -2,7 +2,6 @@ import os
 import shutil
 
 import typer
-from pythonosc import dispatcher, osc_server, udp_client
 
 from emotional_n_back.constants import DATA_DIR
 from emotional_n_back.games.eeg.eeg_stroop import EEGStroopGame
@@ -30,81 +29,23 @@ app.add_typer(osc_app, name="osc")
 def reader(
     ip: str = "127.0.0.1",
     port: int = 5005,
-    visualize: bool = typer.Option(False, "--visualize", help="Visualize incoming EEG signal."),
-    buffer_size: int = 256 * 5, # 5 seconds of data at 256Hz
+    visualize: bool = typer.Option(
+        False, "--visualize", help="Visualize incoming EEG signal."
+    ),
+    buffer_size: int = 256 * 5,  # 5 seconds of data at 256Hz
 ):
     """OSC reader."""
-    import threading
-    import time
-    from collections import deque
-    import numpy as np
+    from emotional_n_back.utils.osc_reader import OSCReader
 
-    data_buffer = deque(maxlen=buffer_size)
-    time_buffer = deque(maxlen=buffer_size)
-
-    def handler(address, *args):
-        if visualize:
-            # Assuming the first arg is the eeg signal
-            data_buffer.append(args[0])
-            time_buffer.append(time.time())
-        else:
-            print(f"Received message from {address}: {args}")
-
-    disp = dispatcher.Dispatcher()
-    disp.map("/*", handler)
-
-    server = osc_server.ThreadingOSCUDPServer((ip, port), disp)
-    server_thread = threading.Thread(target=server.serve_forever)
-    server_thread.daemon = True
-    server_thread.start()
-
-    print(f"Serving on {server.server_address}")
-
-    if visualize:
-        import matplotlib.pyplot as plt
-        plt.ion()
-        fig, ax = plt.subplots()
-        line, = ax.plot(np.zeros(buffer_size))
-        ax.set_ylim(-3, 3)
-        ax.set_xlim(0, 5)
-        plt.show()
-
-        start_time = time.time()
-        while True:
-            try:
-                if not data_buffer:
-                    plt.pause(0.01)
-                    continue
-
-                # Vertical auto-scaling
-                min_val = min(data_buffer)
-                max_val = max(data_buffer)
-                margin = (max_val - min_val) * 0.1
-                ax.set_ylim(min_val - margin, max_val + margin)
-
-                # Horizontal auto-scaling
-                current_time = time.time()
-                ax.set_xlim(current_time - 5, current_time)
-                
-                line.set_data(list(time_buffer), list(data_buffer))
-                fig.canvas.draw()
-                fig.canvas.flush_events()
-                plt.pause(0.01)
-            except (KeyboardInterrupt, Exception):
-                break
-    else:
-        try:
-            while True:
-                pass
-        except KeyboardInterrupt:
-            pass
-
-    server.shutdown()
+    osc_reader = OSCReader(ip, port, visualize, buffer_size)
+    osc_reader.start()
 
 
 @osc_app.command()
 def writer(
-    mode: str = typer.Argument("dummy", help="The streaming mode to use. Can be 'dummy' or 'eeg'."),
+    mode: str = typer.Argument(
+        "dummy", help="The streaming mode to use. Can be 'dummy' or 'eeg'."
+    ),
     ip: str = "127.0.0.1",
     port: int = 5005,
     address: str = None,
@@ -115,43 +56,32 @@ def writer(
     rate_per_sec: float = 0.5,
     dur_range: str = "0.2,0.8",
     amp_range: str = "0.15,0.7",
-    eeg_path: str = typer.Option(None, "--eeg-path", help="Path to the EEG recording file."),
+    eeg_path: str = typer.Option(
+        None, "--eeg-path", help="Path to the EEG recording file."
+    ),
 ):
     """OSC writer."""
-    if eeg_path:
-        mode = "eeg_file"
+    from emotional_n_back.utils.streaming.factory import create_streamer
 
-    if mode == "dummy":
-        from emotional_n_back.utils.streaming.dummy import DummyStreamer
-        if address is None:
-            address = "/some/address"
-        streamer = DummyStreamer(ip=ip, port=port, address=address, message=message)
-    elif mode == "eeg":
-        from emotional_n_back.utils.streaming.eeg_generator import EEGStreamer
-        if address is None:
-            address = "/eeg"
-        streamer = EEGStreamer(
+    try:
+        streamer = create_streamer(
+            mode=mode,
             ip=ip,
             port=port,
             address=address,
+            message=message,
             fs=fs,
             duration=duration,
             seed=seed,
             rate_per_sec=rate_per_sec,
             dur_range=dur_range,
             amp_range=amp_range,
+            eeg_path=eeg_path,
         )
-    elif mode == "eeg_file":
-        from emotional_n_back.utils.streaming.eeg_file_writer import EEGWriter
-        streamer = EEGWriter(eeg_path=eeg_path, host=ip, port=port)
-    else:
-        print(f"Unknown mode: {mode}")
-        raise typer.Exit(code=1)
-
-    if mode == "dummy":
         streamer.stream()
-    else:
-        streamer.start()
+    except ValueError as e:
+        print(e)
+        raise typer.Exit(code=1)
 
 
 @app.command()

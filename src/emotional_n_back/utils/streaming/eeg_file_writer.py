@@ -1,13 +1,11 @@
 import time
 import numpy as np
-from pythonosc.udp_client import SimpleUDPClient
+from .base import BaseStreamer
 
-class EEGWriter:
-    def __init__(self, eeg_path: str, host: str, port: int):
+class EEGWriter(BaseStreamer):
+    def __init__(self, eeg_path: str, ip: str = "127.0.0.1", port: int = 5005):
+        super().__init__(ip, port)
         self.eeg_path = eeg_path
-        self.host = host
-        self.port = port
-        self.client = SimpleUDPClient(self.host, self.port)
         self.sampling_rate, self.data = self._load_data()
 
     def _load_data(self):
@@ -17,7 +15,7 @@ class EEGWriter:
             data = np.loadtxt(lines[1:], usecols=0)
         return sampling_rate, data
 
-    def start(self):
+    def stream(self):
         chunk_size = 32
         while True:
             for i in range(0, len(self.data), chunk_size):
