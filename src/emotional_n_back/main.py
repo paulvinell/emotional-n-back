@@ -303,24 +303,51 @@ def eeg_stroop(
     seed: int | None = None,
     visual_intro_ms: int = 500,
     response_window_ms: int = 2000,
+    feedback_ms: int = 500,
     initial_calibration_trials: int = typer.Option(
         10, help="Number of trials for initial calibration."
     ),
     recalibration_interval: int = typer.Option(
         10, help="How often to recalibrate the threshold."
     ),
+    window_size: str = "900,650",
 ):
-    """
-    Run an EEG-integrated sentiment Stroop test.
-    """
+    """Run an EEG-integrated sentiment Stroop test."""
+    import pygame
+    from emotional_n_back.games.eeg.eeg_stroop.game import EEGStroopGame
+    from emotional_n_back.games.eeg.eeg_stroop.render import GameRenderer
+    from emotional_n_back.games.eeg.eeg_stroop.thread import GameThread
+
+    renderer = GameRenderer(window_size=tuple(map(int, window_size.split(','))))
     game = EEGStroopGame(
         seed=seed,
         visual_intro_ms=visual_intro_ms,
         response_window_ms=response_window_ms,
+        feedback_ms=feedback_ms,
         initial_calibration_trials=initial_calibration_trials,
         recalibration_interval=recalibration_interval,
+        window_size=tuple(map(int, window_size.split(','))),
     )
-    game.run()
+    game.start()
+
+    game_thread = GameThread(game)
+    game_thread.start()
+
+    running = True
+    while running:
+        for event in pygame.event.get():
+            if event.type == pygame.QUIT or (
+                event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
+            ):
+                running = False
+        
+        renderer.render_game(game)
+        renderer.clock.tick(60)
+    
+    game_thread.stop()
+    game_thread.join()
+    game.shutdown()
+    pygame.quit()
 
 
 @app.command()
