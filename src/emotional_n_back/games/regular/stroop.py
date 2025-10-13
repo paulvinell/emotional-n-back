@@ -156,6 +156,7 @@ class SentimentStroopGame:
             if self.length is not None and self.trial_num >= self.length:
                 break
             audio_sentiment = random.choice(self.sentiments)
+            visual_sentiment = random.choice(self.sentiments)
 
             image_path = self.kdef_loader.get_random_image(visual_sentiment)
             image_surface = self._load_fit_image(str(image_path), self.stimulus_rect)

@@ -7,8 +7,8 @@ from typing import Optional
 import numpy as np
 import pygame
 
-from emotional_n_back.eeg.erp import OscErpServer
-from emotional_n_back.stroop import SentimentStroopGame, make_beep
+from emotional_n_back.utils.eeg.erp import OscErpServer
+from emotional_n_back.games.regular.stroop import SentimentStroopGame, make_beep
 
 
 class Reward(Enum):

@@ -13,7 +13,7 @@ from emotional_n_back.data import (
     MAVLoader,
     MAVSentimentLoader,
 )
-from emotional_n_back.nback import NBackSequence
+from emotional_n_back.games.regular.nback import NBackSequence
 
 
 # -------------------- Utilities --------------------

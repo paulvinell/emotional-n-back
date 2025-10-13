@@ -5,7 +5,8 @@ import typer
 from pythonosc import dispatcher, osc_server, udp_client
 
 from emotional_n_back.constants import DATA_DIR
-from emotional_n_back.game import (
+from emotional_n_back.games.eeg.eeg_stroop import EEGStroopGame
+from emotional_n_back.games.game import (
     AudioNBackGame,
     AudioSentimentNBackGame,
     AudioSentimentVisualPositionDualNBack,
@@ -14,12 +15,11 @@ from emotional_n_back.game import (
     VisualNBackGame,
     VisualSentimentNBackGame,
 )
-from emotional_n_back.speed_reading import SpeedReadingGame
-from emotional_n_back.stroop import (
+from emotional_n_back.games.regular.speed_reading import SpeedReadingGame
+from emotional_n_back.games.regular.stroop import (
     AlternatingStroopGame,
     SentimentStroopGame,
 )
-from emotional_n_back.eeg_stroop import EEGStroopGame
 
 app = typer.Typer()
 osc_app = typer.Typer()
@@ -122,12 +122,12 @@ def writer(
         mode = "eeg_file"
 
     if mode == "dummy":
-        from emotional_n_back.streaming.dummy import DummyStreamer
+        from emotional_n_back.utils.streaming.dummy import DummyStreamer
         if address is None:
             address = "/some/address"
         streamer = DummyStreamer(ip=ip, port=port, address=address, message=message)
     elif mode == "eeg":
-        from emotional_n_back.streaming.eeg_generator import EEGStreamer
+        from emotional_n_back.utils.streaming.eeg_generator import EEGStreamer
         if address is None:
             address = "/eeg"
         streamer = EEGStreamer(
@@ -142,7 +142,7 @@ def writer(
             amp_range=amp_range,
         )
     elif mode == "eeg_file":
-        from emotional_n_back.streaming.eeg_file_writer import EEGWriter
+        from emotional_n_back.utils.streaming.eeg_file_writer import EEGWriter
         streamer = EEGWriter(eeg_path=eeg_path, host=ip, port=port)
     else:
         print(f"Unknown mode: {mode}")
