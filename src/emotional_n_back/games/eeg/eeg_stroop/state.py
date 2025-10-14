@@ -1,5 +1,6 @@
 from enum import Enum, auto
 
+
 class GameState(Enum):
     WAIT_EEG = auto()
     PREPARE_TRIAL = auto()
@@ -7,5 +8,4 @@ class GameState(Enum):
     STIMULUS = auto()
     RESPONSE = auto()
     FEEDBACK = auto()
-    ISI = auto()
     FINAL_SCREEN = auto()

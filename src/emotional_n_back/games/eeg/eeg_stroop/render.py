@@ -18,10 +18,10 @@ class GameRenderer:
         self.screen.fill((20, 22, 26))
         if game.state == GameState.WAIT_EEG:
             self.draw_waiting_eeg()
-        elif game.state in [GameState.INTRO, GameState.STIMULUS, GameState.RESPONSE, GameState.FEEDBACK]:
+        elif game.state == GameState.INTRO:
+            self.draw_intro(game.get_trial_data())
+        elif game.state in [GameState.STIMULUS, GameState.RESPONSE, GameState.FEEDBACK]:
             self.draw_trial(game.get_trial_data())
-        elif game.state == GameState.ISI:
-            self.draw_isi(game.get_trial_data())
         elif game.state == GameState.FINAL_SCREEN:
             self.draw_final_screen(game.get_final_screen_data())
         pygame.display.flip()
@@ -29,18 +29,16 @@ class GameRenderer:
     def draw_trial(self, trial_data):
         self.screen.fill((20, 22, 26))
         self.draw_header(trial_data["trial_num"], trial_data["is_calibrating"])
-        self.draw_stimulus_box(trial_data["stimulus_rect"], trial_data["image_surface"])
+        self.draw_stimulus_box(trial_data["stimulus_rect"], trial_data.get("image_surface"))
         if trial_data.get("reward") is not None:
             self.draw_feedback_overlay(trial_data["stimulus_rect"], trial_data["reward"])
         self.draw_scorebar(trial_data["score"], trial_data["scoreable_trial_num"])
         pygame.display.flip()
 
-    def draw_isi(self, trial_data):
+    def draw_intro(self, trial_data):
         self.screen.fill((20, 22, 26))
         self.draw_header(trial_data["trial_num"], trial_data["is_calibrating"])
-        self.draw_stimulus_box(trial_data["stimulus_rect"], trial_data.get("image_surface"))
-        if trial_data.get("reward") is not None:
-            self.draw_feedback_overlay(trial_data["stimulus_rect"], trial_data["reward"])
+        self.draw_stimulus_box(trial_data["stimulus_rect"])
         self.draw_scorebar(trial_data["score"], trial_data["scoreable_trial_num"])
         pygame.display.flip()
 

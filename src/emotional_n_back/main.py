@@ -301,9 +301,7 @@ def alternating_stroop(
 @app.command()
 def eeg_stroop(
     seed: int | None = None,
-    visual_intro_ms: int = 500,
-    response_window_ms: int = 2000,
-    feedback_ms: int = 500,
+    stimulus_intro_ms: int = 500,
     initial_calibration_trials: int = typer.Option(
         10, help="Number of trials for initial calibration."
     ),
@@ -321,9 +319,7 @@ def eeg_stroop(
     renderer = GameRenderer(window_size=tuple(map(int, window_size.split(','))))
     game = EEGStroopGame(
         seed=seed,
-        visual_intro_ms=visual_intro_ms,
-        response_window_ms=response_window_ms,
-        feedback_ms=feedback_ms,
+        stimulus_intro_ms=stimulus_intro_ms,
         initial_calibration_trials=initial_calibration_trials,
         recalibration_interval=recalibration_interval,
         window_size=tuple(map(int, window_size.split(','))),

@@ -1,6 +1,6 @@
 import random
-import time
-from enum import Enum, auto
+
+
 from typing import Optional
 
 import numpy as np
@@ -50,10 +50,7 @@ class EEGStroopGame:
     def __init__(
         self,
         seed: Optional[int] = None,
-        visual_intro_ms: int = 500,
-        response_window_ms: int = 2000,
-        feedback_ms: int = 500,
-        isi_ms: int = 300,
+        stimulus_intro_ms: int = 500,
         window_size=(900, 650),
         fs_fallback: float = 256.0,
         initial_calibration_trials: int = 10,
@@ -64,10 +61,7 @@ class EEGStroopGame:
     ):
         if seed is not None:
             random.seed(seed)
-        self.visual_intro_ms = visual_intro_ms
-        self.response_window_ms = response_window_ms
-        self.feedback_ms = feedback_ms
-        self.isi_ms = isi_ms
+        self.stimulus_intro_ms = stimulus_intro_ms
 
         # Data Loaders
         self.kdef_loader = KDEFSentimentLoader()
@@ -130,8 +124,6 @@ class EEGStroopGame:
             self.state = self._response()
         elif self.state == GameState.FEEDBACK:
             self.state = self._feedback()
-        elif self.state == GameState.ISI:
-            self.state = self._isi()
 
     def _wait_eeg(self):
         if self.erp_adapter.eeg_started.is_set():
@@ -161,7 +153,7 @@ class EEGStroopGame:
         return GameState.INTRO
 
     def _intro(self):
-        if pygame.time.get_ticks() - self.trial_start_t > self.visual_intro_ms:
+        if pygame.time.get_ticks() - self.trial_start_t > self.stimulus_intro_ms:
             self.trial_start_t = pygame.time.get_ticks()
             return GameState.STIMULUS
         return GameState.INTRO
@@ -177,16 +169,6 @@ class EEGStroopGame:
         erp_update = self.erp_adapter.poll_update(self.event_code)
         if erp_update:
             self._process_erp_update(erp_update)
-            self.trial_start_t = pygame.time.get_ticks()
-            return GameState.FEEDBACK
-
-        if pygame.time.get_ticks() - self.trial_start_t > self.response_window_ms:
-            # Timeout, check one last time
-            erp_update = self.erp_adapter.poll_update(self.event_code)
-            if erp_update:
-                self._process_erp_update(erp_update)
-
-            self.trial_start_t = pygame.time.get_ticks()
             return GameState.FEEDBACK
 
         return GameState.RESPONSE
@@ -213,32 +195,13 @@ class EEGStroopGame:
                     self.beep_failure.play()
 
     def _feedback(self):
-        if pygame.time.get_ticks() - self.trial_start_t > self.feedback_ms:
-            self.trial_start_t = pygame.time.get_ticks()
-            return GameState.ISI
-        return GameState.FEEDBACK
-
-    def _isi(self):
         if self.trial_duration_ms is not None:
-            wait_ms = self.trial_duration_ms - (
-                pygame.time.get_ticks() - self.trial_start_t
-            )
-
-            if wait_ms < 0:
-                self.trial_start_t = pygame.time.get_ticks()
+            if pygame.time.get_ticks() - self.trial_start_t > self.trial_duration_ms:
                 self.trial_num += 1
                 if self.stats is not None:
                     self.scoreable_trial_num += 1
                 return GameState.PREPARE_TRIAL
-
-        elif pygame.time.get_ticks() - self.trial_start_t > self.isi_ms:
-            self.trial_start_t = pygame.time.get_ticks()
-            self.trial_num += 1
-            if self.stats is not None:
-                self.scoreable_trial_num += 1
-            return GameState.PREPARE_TRIAL
-
-        return GameState.ISI
+        return GameState.FEEDBACK
 
     def _load_fit_image(self, path: str, box: Rect) -> pygame.Surface:
         if path in self._img_cache:
@@ -251,15 +214,17 @@ class EEGStroopGame:
         return surf
 
     def get_trial_data(self):
-        return {
+        data = {
             "trial_num": self.trial_num,
             "is_calibrating": self.stats is None,
             "stimulus_rect": self.stimulus_rect,
-            "image_surface": self.image_surface,
             "reward": self.reward,
             "score": self.score,
             "scoreable_trial_num": self.scoreable_trial_num,
         }
+        if self.state != GameState.INTRO:
+            data["image_surface"] = self.image_surface
+        return data
 
     def get_final_screen_data(self):
         return {
