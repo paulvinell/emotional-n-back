@@ -96,7 +96,10 @@ class GameRenderer:
     def draw_fs(self, trial_data):
         if not trial_data.get("show_fs"):
             return
-        fs = trial_data.get("fs", 0)
+        if trial_data.get("is_estimating_fs"):
+            fs = trial_data.get("fs", 0)
+        else:
+            fs = trial_data.get("continuous_fs_est", 0)
         fs_text = self.font_small.render(f"fs: {fs:.1f} Hz", True, (200, 200, 200))
         text_rect = fs_text.get_rect()
         text_rect.bottomright = self.screen.get_rect().bottomright

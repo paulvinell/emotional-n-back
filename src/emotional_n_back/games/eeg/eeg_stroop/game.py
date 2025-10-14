@@ -1,6 +1,4 @@
 import random
-
-
 from typing import Optional
 
 import numpy as np
@@ -53,7 +51,7 @@ class EEGStroopGame:
         stimulus_intro_ms: int = 500,
         window_size=(900, 650),
         fs: Optional[float] = None,
-        fs_estimation_duration_s: float = 3.0,
+        fs_estimation_duration_s: float = 5.0,
         initial_calibration_trials: int = 10,
         recalibration_interval: int = 10,
         outlier_std_devs: Optional[float] = 3.0,
@@ -246,13 +244,17 @@ class EEGStroopGame:
             "score": self.score,
             "scoreable_trial_num": self.scoreable_trial_num,
             "show_fs": self.show_fs,
+            "fs": self.erp_adapter.effective_fs,
+            "continuous_fs_est": self.erp_adapter.continuous_fs_est,
         }
-        if self.show_fs:
-            data["fs"] = self.erp_adapter.effective_fs
 
         if self.state == GameState.ESTIMATING_FS:
-            data["fs_estimation_remaining_s"] = self.erp_adapter.fs_estimation_remaining_s
-            data["fs_estimation_countdown_s"] = self.erp_adapter.fs_estimation_countdown_s
+            data["fs_estimation_remaining_s"] = (
+                self.erp_adapter.fs_estimation_remaining_s
+            )
+            data["fs_estimation_countdown_s"] = (
+                self.erp_adapter.fs_estimation_countdown_s
+            )
 
         if self.state != GameState.INTRO:
             data["image_surface"] = self.image_surface

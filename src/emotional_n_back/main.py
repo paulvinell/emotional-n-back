@@ -1,6 +1,6 @@
 import os
-from typing import Optional
 import shutil
+from typing import Optional
 
 import typer
 
@@ -310,25 +310,30 @@ def eeg_stroop(
         10, help="How often to recalibrate the threshold."
     ),
     window_size: str = "900,650",
-    show_fs: bool = typer.Option(False, "--show-fs", help="Show estimated sampling rate."),
-    fs: Optional[float] = typer.Option(None, "--fs", help="Sampling rate of the EEG stream."),
+    show_fs: bool = typer.Option(
+        False, "--show-fs", help="Show estimated sampling rate."
+    ),
+    fs: Optional[float] = typer.Option(
+        None, "--fs", help="Sampling rate of the EEG stream."
+    ),
     fs_estimation_duration_s: float = typer.Option(
-        3.0, help="Duration of the initial sampling rate estimation phase."
+        5.0, help="Duration of the initial sampling rate estimation phase."
     ),
 ):
     """Run an EEG-integrated sentiment Stroop test."""
     import pygame
+
     from emotional_n_back.games.eeg.eeg_stroop.game import EEGStroopGame
     from emotional_n_back.games.eeg.eeg_stroop.render import GameRenderer
     from emotional_n_back.games.eeg.eeg_stroop.thread import GameThread
 
-    renderer = GameRenderer(window_size=tuple(map(int, window_size.split(','))))
+    renderer = GameRenderer(window_size=tuple(map(int, window_size.split(","))))
     game = EEGStroopGame(
         seed=seed,
         stimulus_intro_ms=stimulus_intro_ms,
         initial_calibration_trials=initial_calibration_trials,
         recalibration_interval=recalibration_interval,
-        window_size=tuple(map(int, window_size.split(','))),
+        window_size=tuple(map(int, window_size.split(","))),
         show_fs=show_fs,
         fs=fs,
         fs_estimation_duration_s=fs_estimation_duration_s,
@@ -345,10 +350,10 @@ def eeg_stroop(
                 event.type == pygame.KEYDOWN and event.key == pygame.K_ESCAPE
             ):
                 running = False
-        
+
         renderer.render_game(game)
         renderer.clock.tick(60)
-    
+
     game_thread.stop()
     game_thread.join()
     game.shutdown()

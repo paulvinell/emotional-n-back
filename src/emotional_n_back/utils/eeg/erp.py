@@ -495,7 +495,7 @@ class OscErpServer:
         host: str,
         port: int,
         fs: Optional[float] = None,
-        fs_estimation_duration_s: float = 3.0,
+        fs_estimation_duration_s: float = 5.0,
         tmin: float = -0.2,
         tmax: float = 0.8,
         baseline: Tuple[Optional[float], Optional[float]] = (None, 0.0),
@@ -520,6 +520,7 @@ class OscErpServer:
         self.is_estimating_fs = self.fs is None
         self.fs_estimation_start_time: Optional[float] = None
         self.fs_estimation_samples = 0
+        self.initial_fs_est: Optional[float] = None
         self.n_samples = 0
         self.last_time = None
         self.fs_est = 0.0
@@ -541,7 +542,11 @@ class OscErpServer:
     @property
     def effective_fs(self) -> float:
         """Return the estimated sampling rate, or the fixed one if provided."""
-        return self.fs if self.fs is not None else self.fs_est
+        if self.fs is not None:
+            return self.fs
+        if self.initial_fs_est is not None:
+            return self.initial_fs_est
+        return self.fs_est
 
     @property
     def fs_estimation_remaining_s(self) -> float:
@@ -553,6 +558,10 @@ class OscErpServer:
     @property
     def fs_estimation_countdown_s(self) -> float:
         return self.fs_estimation_duration_s
+
+    @property
+    def continuous_fs_est(self) -> float:
+        return self.fs_est
 
     def _publish_update(self, update: dict):
         print(json.dumps({"type": "erp_update", **update}), flush=True)
@@ -595,19 +604,22 @@ class OscErpServer:
                     self.fs_est = self.fs_estimation_samples / elapsed
                 if elapsed > self.fs_estimation_duration_s:
                     self.is_estimating_fs = False
-            elif self.fs is None:
-                now = time.time()
-                if self.last_time is not None:
-                    delta_t = now - self.last_time
-                    if delta_t > 1e-6:
-                        current_fs = samples.size / delta_t
-                        if self.fs_est <= 0:
-                            self.fs_est = current_fs
-                        else:
-                            self.fs_est = (self.alpha * current_fs) + (
-                                1.0 - self.alpha
-                            ) * self.fs_est
-                self.last_time = now
+                    self.initial_fs_est = self.fs_est
+                    self.logger.info(
+                        "Estimated sampling rate: %.2f Hz", self.initial_fs_est
+                    )
+            now = time.time()
+            if self.last_time is not None:
+                delta_t = now - self.last_time
+                if delta_t > 1e-6:
+                    current_fs = samples.size / delta_t
+                    if self.fs_est <= 0:
+                        self.fs_est = current_fs
+                    else:
+                        self.fs_est = (self.alpha * current_fs) + (
+                            1.0 - self.alpha
+                        ) * self.fs_est
+            self.last_time = now
 
             if self.epocher is None:
                 if self.effective_fs <= 0:

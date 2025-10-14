@@ -44,6 +44,10 @@ class ErpAdapter:
     def fs_estimation_countdown_s(self) -> float:
         return self._server.fs_estimation_countdown_s
 
+    @property
+    def continuous_fs_est(self) -> float:
+        return self._server.continuous_fs_est
+
     def _handle_erp_update(self, update: dict):
         component_data = update.get("component", {}).get(self.erp_component, {})
         erp_update = ErpUpdate(
