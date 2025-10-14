@@ -494,7 +494,7 @@ class OscErpServer:
         self,
         host: str,
         port: int,
-        fs_fallback: float,
+        fs: Optional[float] = None,
         tmin: float = -0.2,
         tmax: float = 0.8,
         baseline: Tuple[Optional[float], Optional[float]] = (None, 0.0),
@@ -507,12 +507,18 @@ class OscErpServer:
         from pythonosc.osc_server import ThreadingOSCUDPServer
 
         self.logger = logger or logging.getLogger("osc_erp")
-        self._fs_hint = float(fs_fallback)
+        self.fs = fs
         self.epocher: Optional[StreamEpocher] = None
         self.on_update = on_update
         self.eeg_started = eeg_started
 
         self._q = queue.Queue()  # queue of callables to serialize ingestion
+
+        # fs estimation
+        self.n_samples = 0
+        self.last_time = None
+        self.fs_est = 0.0
+        self.alpha = 0.1  # EMA smoothing factor
 
         # Build OSC dispatcher
         disp = Dispatcher()
@@ -527,6 +533,11 @@ class OscErpServer:
         self._tmin, self._tmax, self._baseline = tmin, tmax, baseline
         self._components_to_calculate = components_to_calculate
 
+    @property
+    def effective_fs(self) -> float:
+        """Return the estimated sampling rate, or the fixed one if provided."""
+        return self.fs if self.fs is not None else self.fs_est
+
     def _publish_update(self, update: dict):
         print(json.dumps({"type": "erp_update", **update}), flush=True)
         if self.on_update:
@@ -535,8 +546,11 @@ class OscErpServer:
     def ingest_event(self, code: str):
         """Ingest an event from within the same process."""
         if self.epocher is None:
+            if self.effective_fs <= 0:
+                self.logger.warning("Cannot create epocher, fs=%.2f", self.effective_fs)
+                return
             self.epocher = StreamEpocher(
-                fs=self._fs_hint,
+                fs=self.effective_fs,
                 tmin=self._tmin,
                 tmax=self._tmax,
                 baseline=self._baseline,
@@ -554,9 +568,27 @@ class OscErpServer:
         try:
             samples = np.asarray(args, dtype=np.float64)
 
+            # Update sampling rate estimate
+            if self.fs is None:
+                now = time.time()
+                if self.last_time is not None:
+                    delta_t = now - self.last_time
+                    if delta_t > 1e-6:
+                        current_fs = samples.size / delta_t
+                        if self.fs_est <= 0:
+                            self.fs_est = current_fs
+                        else:
+                            self.fs_est = (self.alpha * current_fs) + (
+                                1.0 - self.alpha
+                            ) * self.fs_est
+                self.last_time = now
+
             if self.epocher is None:
+                if self.effective_fs <= 0:
+                    # Can't create epocher yet, fs is not known
+                    return
                 self.epocher = StreamEpocher(
-                    fs=self._fs_hint,
+                    fs=self.effective_fs,
                     tmin=self._tmin,
                     tmax=self._tmax,
                     baseline=self._baseline,

@@ -15,16 +15,21 @@ class ErpUpdate:
     raw: Dict  # full original payload for debugging
 
 class ErpAdapter:
-    def __init__(self, erp_component: str, **kwargs):
+    def __init__(self, erp_component: str, fs: Optional[float] = None, **kwargs):
         self.erp_component = erp_component
         self._updates = queue.Queue()
         self.eeg_started = threading.Event()
         self._server = OscErpServer(
+            fs=fs,
             on_update=self._handle_erp_update,
             components_to_calculate=[erp_component],
             eeg_started=self.eeg_started,
             **kwargs
         )
+
+    @property
+    def effective_fs(self) -> float:
+        return self._server.effective_fs
 
     def _handle_erp_update(self, update: dict):
         component_data = update.get("component", {}).get(self.erp_component, {})

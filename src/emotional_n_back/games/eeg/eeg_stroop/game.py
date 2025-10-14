@@ -52,16 +52,18 @@ class EEGStroopGame:
         seed: Optional[int] = None,
         stimulus_intro_ms: int = 500,
         window_size=(900, 650),
-        fs_fallback: float = 256.0,
+        fs: Optional[float] = None,
         initial_calibration_trials: int = 10,
         recalibration_interval: int = 10,
         outlier_std_devs: Optional[float] = 3.0,
         erp_component: str = "P300",
         trial_duration_ms: Optional[int] = 2500,
+        show_fs: bool = False,
     ):
         if seed is not None:
             random.seed(seed)
         self.stimulus_intro_ms = stimulus_intro_ms
+        self.show_fs = show_fs
 
         # Data Loaders
         self.kdef_loader = KDEFSentimentLoader()
@@ -95,7 +97,7 @@ class EEGStroopGame:
             erp_component=self.erp_component,
             host="127.0.0.1",
             port=5005,
-            fs_fallback=fs_fallback,
+            fs=fs,
         )
 
         self.calibration = Calibration()
@@ -221,7 +223,11 @@ class EEGStroopGame:
             "reward": self.reward,
             "score": self.score,
             "scoreable_trial_num": self.scoreable_trial_num,
+            "show_fs": self.show_fs,
         }
+        if self.show_fs:
+            data["fs"] = self.erp_adapter.effective_fs
+
         if self.state != GameState.INTRO:
             data["image_surface"] = self.image_surface
         return data

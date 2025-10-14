@@ -309,6 +309,8 @@ def eeg_stroop(
         10, help="How often to recalibrate the threshold."
     ),
     window_size: str = "900,650",
+    show_fs: bool = typer.Option(False, "--show-fs", help="Show estimated sampling rate."),
+    fs: Optional[float] = typer.Option(None, "--fs", help="Sampling rate of the EEG stream."),
 ):
     """Run an EEG-integrated sentiment Stroop test."""
     import pygame
@@ -323,6 +325,8 @@ def eeg_stroop(
         initial_calibration_trials=initial_calibration_trials,
         recalibration_interval=recalibration_interval,
         window_size=tuple(map(int, window_size.split(','))),
+        show_fs=show_fs,
+        fs=fs,
     )
     game.start()
 
