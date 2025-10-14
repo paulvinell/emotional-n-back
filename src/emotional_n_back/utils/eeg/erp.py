@@ -10,11 +10,11 @@ import queue
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Iterable, List, Optional, Tuple, Union
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
-from scipy.signal import butter, sosfilt
+from scipy.signal import butter, iirnotch, sosfilt, tf2sos
 
 # ----------------------- Configuration -----------------------
 
@@ -36,6 +36,9 @@ COMPONENT_SCORING_SPECS = {
     "LPP": (0.1, 8.0),
 }
 
+# Numerical stability constant
+EPS = 1e-6
+
 # ----------------------- Utilities ---------------------------
 
 
@@ -45,6 +48,7 @@ class PendingEvent:
     code: str
     pending_components: List[str]
     base_metrics: Optional[Tuple[float, float]] = None
+    base_artifacts: Optional[Tuple[NDArray, NDArray]] = None
 
 
 @dataclass
@@ -123,8 +127,21 @@ class StreamEpocher:
         use_artifact_detection: bool = True,
         blink_threshold_mult: Tuple[float, float] = (10.0, 7.0),
         emg_threshold_mult: Tuple[float, float] = (8.0, 5.0),
+        notch_hz: float = 50.0,  # Mandatory 50/60 Hz notch
+        notch_q: float = 30.0,  # Quality factor for the notch filter
+        trim_s: float = 0.05,  # Seconds to trim from artifact window edges
+        blink_env_s: float = 0.03,  # Blink envelope window
+        emg_rms_s: float = 0.08,  # EMG RMS window
     ) -> None:
         assert fs > 0, "Sampling rate fs must be positive"
+        if notch_hz not in (50.0, 60.0):
+            raise ValueError("notch_hz must be 50.0 or 60.0")
+        # Ensure notch frequency is safely below Nyquist to avoid instability
+        if notch_hz >= fs * 0.45:
+            raise ValueError(
+                f"notch_hz ({notch_hz}) must be less than 0.45 * fs ({0.45 * fs})"
+            )
+
         self.fs = float(fs)
         self.tmin = float(tmin)
         self.tmax = float(tmax)
@@ -136,6 +153,9 @@ class StreamEpocher:
             blink_threshold_mult
         )
         self.emg_threshold_mult_high, self.emg_threshold_mult_low = emg_threshold_mult
+        self.trim_s = trim_s
+        self.blink_env_s = blink_env_s
+        self.emg_rms_s = emg_rms_s
 
         # Store component specs in a dict for easy lookup
         specs_to_use = component_specs or COMPONENT_SPECS
@@ -153,11 +173,27 @@ class StreamEpocher:
                     self.scoring_filters[comp_name] = butter(
                         2, [l, h], btype="band", output="sos"
                     )
+                else:
+                    self.logger.warning(
+                        "Cannot build scoring filter for %s with band [%.2f, %.2f] Hz at fs=%.2f",
+                        comp_name,
+                        low,
+                        high,
+                        self.fs,
+                    )
 
         # Buffer sized for epoch window + a safety margin
         cap = int((tmax - tmin + extra_seconds) * fs)
         cap = max(cap, 1)
-        self.rb = RingBuffer.with_capacity(capacity=cap)
+        self.rb_raw = RingBuffer.with_capacity(capacity=cap)
+        self.rb_erp = RingBuffer.with_capacity(capacity=cap)
+
+        # Per-component forward-filtered buffers and filter states
+        self.rb_comp = {}
+        self.zi_comp = {}
+        for comp_name, sos in self.scoring_filters.items():
+            self.rb_comp[comp_name] = RingBuffer.with_capacity(capacity=cap)
+            self.zi_comp[comp_name] = np.zeros((sos.shape[0], 2))
 
         # Global sample index = number of samples ingested so far
         self.global_idx = 0
@@ -165,14 +201,19 @@ class StreamEpocher:
         # Pending events to be processed
         self.events: List[PendingEvent] = []
 
-        # Pre-compute filters
+        # --- Mandatory Notch Filter (for ERP path and artifact checks) ---
+        b_notch, a_notch = iirnotch(notch_hz, notch_q, fs=self.fs)
+        self.sos_notch = tf2sos(b_notch, a_notch)
+        self.filt_zi_notch = np.zeros((self.sos_notch.shape[0], 2))
+
+        # --- Stream ERP Band Filter (for ERP buffer) ---
         nyq = max(fs / 2.0, 1.0)
         low = max(hp, 0.01) / nyq
         high = min(lp, nyq - 1e-6) / nyq
         if not (0 < low < high < 1):
             raise ValueError(f"Invalid band [{hp}, {lp}] for fs={fs}")
-        self.sos = butter(4, [low, high], btype="band", output="sos")
-        self.filt_zi = np.zeros((self.sos.shape[0], 2))
+        self.sos_erp = butter(4, [low, high], btype="band", output="sos")
+        self.filt_zi_erp = np.zeros((self.sos_erp.shape[0], 2))
 
         if self.use_artifact_detection:
             self.sos_blink = butter(
@@ -189,6 +230,10 @@ class StreamEpocher:
         self.n_post = int(round(tmax * fs))
         self.epoch_len = self.n_pre + self.n_post
 
+        # Logging throttle
+        self._last_log_time = 0
+        self._log_interval_s = 5.0  # Log max once every 5s
+
     # ------------------ new artifact detection helpers ------------------
 
     def _baseline_indices(self, ev_idx):
@@ -199,28 +244,31 @@ class StreamEpocher:
         return i0, i1
 
     def _baseline_metrics(self, i0, i1):
-        if not self.rb.has_range(i0, i1) or (i1 - i0) < int(0.12 * self.fs):
+        if not self.rb_raw.has_range(i0, i1) or (i1 - i0) < int(0.12 * self.fs):
             return None  # not enough baseline to judge
-        base_raw = self.rb.get_range(i0, i1)
-        bb = sosfilt(self.sos_blink, base_raw.copy())
-        ee = sosfilt(self.sos_emg, base_raw.copy())
-        mad_low = 1.4826 * np.median(np.abs(bb - np.median(bb))) + 1e-6
-        w = max(1, int(0.05 * self.fs))
+        base_raw = self.rb_raw.get_range(i0, i1)
+        # **Mandatory**: Notch filter before artifact band extraction
+        base_notched = sosfilt(self.sos_notch, base_raw.copy())
+
+        bb = sosfilt(self.sos_blink, base_notched.copy())
+        ee = sosfilt(self.sos_emg, base_notched.copy())
+        mad_low = 1.4826 * np.median(np.abs(bb - np.median(bb))) + EPS
+        w = max(1, int(self.emg_rms_s * self.fs))
         if len(ee) < w:
             return None
         rms = np.sqrt(np.convolve(ee**2, np.ones(w) / w, mode="valid"))
-        med_rms = np.median(rms) + 1e-6
+        med_rms = np.median(rms) + EPS
         return mad_low, med_rms
 
     def _blink_exceeds(self, y_blink, thr):
-        w = max(1, int(0.03 * self.fs))  # ~30 ms
+        w = max(1, int(self.blink_env_s * self.fs))
         if len(y_blink) < w:
             return False
         env = np.convolve(np.abs(y_blink), np.ones(w) / w, mode="same")
         return bool(np.any(env > thr))
 
     def _emg_exceeds(self, y_emg, base_med_rms, mult):
-        w = max(1, int(0.08 * self.fs))  # ~80 ms
+        w = max(1, int(self.emg_rms_s * self.fs))
         if len(y_emg) < w:
             return False
         rms = np.sqrt(np.convolve(y_emg**2, np.ones(w) / w, mode="same"))
@@ -235,12 +283,12 @@ class StreamEpocher:
         )
 
     def _artifact_ratios(self, y_blink, y_emg, mad_low, med_rms):
-        w_b = max(1, int(0.03 * self.fs))
+        w_b = max(1, int(self.blink_env_s * self.fs))
         env_b = np.convolve(np.abs(y_blink), np.ones(w_b) / w_b, mode="same")
-        w_e = max(1, int(0.08 * self.fs))
+        w_e = max(1, int(self.emg_rms_s * self.fs))
         rms_e = np.sqrt(np.convolve(y_emg**2, np.ones(w_e) / w_e, mode="same"))
-        return float(env_b.max() / (mad_low + 1e-6)), float(
-            rms_e.max() / (med_rms + 1e-6)
+        return float(env_b.max() / (mad_low + EPS)), float(
+            rms_e.max() / (med_rms + EPS)
         )
 
     # ------------------ ingesting data & events ------------------
@@ -256,10 +304,20 @@ class StreamEpocher:
         if x.ndim != 1:
             raise ValueError("Samples must be a 1-D array")
 
-        # Main ERP-band filtering
-        y, self.filt_zi = sosfilt(self.sos, x, zi=self.filt_zi)
-        self.rb.append(y)
-        self.global_idx += y.size
+        # RAW buffer: store unmodified data for artifact detection
+        self.rb_raw.append(x)
+
+        # ERP buffer: apply notch and stream band-pass filters sequentially
+        y, self.filt_zi_notch = sosfilt(self.sos_notch, x, zi=self.filt_zi_notch)
+        y, self.filt_zi_erp = sosfilt(self.sos_erp, y, zi=self.filt_zi_erp)
+        self.rb_erp.append(y)
+
+        # Streamed forward-pass for each component's scoring filter
+        for comp_name, sos in self.scoring_filters.items():
+            yc, self.zi_comp[comp_name] = sosfilt(sos, y, zi=self.zi_comp[comp_name])
+            self.rb_comp[comp_name].append(yc)
+
+        self.global_idx += x.size
 
         # After each chunk, check if any components are ready
         self._check_and_publish_components()
@@ -342,25 +400,27 @@ class StreamEpocher:
 
                     # Final baseline check for event-level flag
                     # A) Baseline-only detection, no pad/back-contamination
-                    base_raw = self.rb.get_range(i0, i1)
-                    bb = sosfilt(self.sos_blink, base_raw.copy())
-                    ee = sosfilt(self.sos_emg, base_raw.copy())
+                    base_raw = self.rb_raw.get_range(i0, i1)
+                    base_notched = sosfilt(self.sos_notch, base_raw.copy())
+                    bb = sosfilt(self.sos_blink, base_notched.copy())
+                    ee = sosfilt(self.sos_emg, base_notched.copy())
+                    event.base_artifacts = (bb, ee)  # Cache for ratio calculation
 
-                    trim = int(0.05 * self.fs)  # ~50 ms
+                    trim = int(self.trim_s * self.fs)
                     if len(bb) > 2 * trim:
                         bb = bb[trim:-trim]
                     if len(ee) > 2 * trim:
                         ee = ee[trim:-trim]
 
                     # Blink baseline check with persistence (no pads applied beyond the baseline slice itself)
-                    w_b = max(1, int(0.03 * self.fs))
+                    w_b = max(1, int(self.blink_env_s * self.fs))
                     env_b = np.convolve(np.abs(bb), np.ones(w_b) / w_b, mode="same")
                     blink_in_baseline = bool(
                         np.any(env_b > self.blink_threshold_mult_high * mad_low)
                     )
 
                     # EMG baseline check with persistence
-                    w_e = max(1, int(0.08 * self.fs))
+                    w_e = max(1, int(self.emg_rms_s * self.fs))
                     rms_e = np.sqrt(np.convolve(ee**2, np.ones(w_e) / w_e, mode="same"))
                     thr_e = self.emg_threshold_mult_high * med_rms
                     above_e = rms_e > thr_e
@@ -382,7 +442,7 @@ class StreamEpocher:
                 _, (w0, w1), _ = spec
                 comp_end_idx = event.ev_idx + int(round(w1 * self.fs))
 
-                if not self.rb.has_range(event.ev_idx - self.n_pre, comp_end_idx):
+                if not self.rb_erp.has_range(event.ev_idx - self.n_pre, comp_end_idx):
                     remaining_components.append(comp_name)
                     continue
 
@@ -393,9 +453,17 @@ class StreamEpocher:
 
                 if self.use_artifact_detection:
                     if event_clean_flag == "unknown":
+                        now = time.time()
+                        if now - self._last_log_time > self._log_interval_s:
+                            self.logger.warning(
+                                "Event %s at %d: baseline metrics unavailable, marking as unclean.",
+                                event.code,
+                                event.ev_idx,
+                            )
+                            self._last_log_time = now
                         is_clean = False
                         reason = "baseline_unavailable"
-                        final_clean_flag = False
+                        final_clean_flag = "unknown"
                     elif event_clean_flag is False:
                         is_clean = False
                         reason = "baseline_contaminated"
@@ -410,13 +478,25 @@ class StreamEpocher:
                             reason = "component_window_too_short"
                             final_clean_flag = "unknown"
 
-                        elif self.rb.has_range(comp_start_idx, comp_end_idx):
-                            comp_raw = self.rb.get_range(comp_start_idx, comp_end_idx)
+                        elif self.rb_raw.has_range(comp_start_idx, comp_end_idx):
+                            comp_raw = self.rb_raw.get_range(
+                                comp_start_idx, comp_end_idx
+                            )
                             base_metrics = event.base_metrics
                             if base_metrics is not None:
                                 mad_low, med_rms = base_metrics
-                                y_blink = sosfilt(self.sos_blink, comp_raw)
-                                y_emg = sosfilt(self.sos_emg, comp_raw)
+                                # Notch first, then check for artifacts
+                                comp_notched = sosfilt(self.sos_notch, comp_raw)
+                                y_blink = sosfilt(self.sos_blink, comp_notched)
+                                y_emg = sosfilt(self.sos_emg, comp_notched)
+
+                                # Trim edges to avoid filter ringing artifacts
+                                trim = int(self.trim_s * self.fs)
+                                if len(y_blink) > 2 * trim:
+                                    y_blink = y_blink[trim:-trim]
+                                if len(y_emg) > 2 * trim:
+                                    y_emg = y_emg[trim:-trim]
+
                                 if self._blink_exceeds(
                                     y_blink, self.blink_threshold_mult_low * mad_low
                                 ) or self._emg_exceeds(
@@ -426,16 +506,40 @@ class StreamEpocher:
                                     reason = "component_window_contaminated"
                                     final_clean_flag = False
 
-                # Always score the component
-                epoch_all = self.rb.get_range(event.ev_idx - self.n_pre, comp_end_idx)
+                # Always score the component from the pre-filtered ERP buffer
+                epoch_all = self.rb_erp.get_range(
+                    event.ev_idx - self.n_pre, comp_end_idx
+                )
                 t_epoch = np.arange(len(epoch_all)) / self.fs + self.tmin
-                epoch = self._baseline_correct(epoch_all)
 
-                # Apply component-specific scoring filter if available
-                if comp_name in self.scoring_filters:
-                    scoring_epoch = sosfilt(self.scoring_filters[comp_name], epoch)
+                # Get forward-filtered data and apply a reverse pass to approximate zero-phase
+                if comp_name in self.rb_comp:
+                    fwd_slice = self.rb_comp[comp_name].get_range(
+                        event.ev_idx - self.n_pre, comp_end_idx
+                    )
+
+                    # --- Baseline correct the component-filtered slice ---
+                    b0, b1 = self.baseline
+                    if b0 is None:
+                        b0 = self.tmin
+                    if b1 is None:
+                        b1 = 0.0
+                    ib0 = int(round((b0 - self.tmin) * self.fs))
+                    ib1 = int(round((b1 - self.tmin) * self.fs))
+                    if ib1 > ib0 and ib1 <= len(fwd_slice):
+                        baseline_val = float(fwd_slice[ib0:ib1].mean())
+                        fwd_slice -= baseline_val
+
+                    if len(fwd_slice) >= 3:
+                        sos = self.scoring_filters[comp_name]
+                        zi_reverse = np.zeros((sos.shape[0], 2))
+                        rev = fwd_slice[::-1].copy()
+                        rev_filt, _ = sosfilt(sos, rev, zi=zi_reverse)
+                        scoring_epoch = rev_filt[::-1]
+                    else:
+                        scoring_epoch = fwd_slice  # Too short, use forward-pass only
                 else:
-                    scoring_epoch = epoch
+                    scoring_epoch = self._baseline_correct(epoch_all)  # Fallback
 
                 comp_data = self._score_component(scoring_epoch, comp_name, t_epoch)
 
@@ -444,23 +548,15 @@ class StreamEpocher:
                         "status": "artifact_detected",
                         "reason": reason,
                     }
-                    if reason == "baseline_contaminated" and event.base_metrics:
+                    if (
+                        reason == "baseline_contaminated"
+                        and event.base_metrics
+                        and event.base_artifacts
+                    ):
                         mad_low, med_rms = event.base_metrics
-                        base_raw = self.rb.get_range(
-                            *self._baseline_indices(event.ev_idx)
-                        )
-                        bb = sosfilt(self.sos_blink, base_raw.copy())
-                        ee = sosfilt(self.sos_emg, base_raw.copy())
+                        bb, ee = event.base_artifacts
                         b_ratio, e_ratio = self._artifact_ratios(
                             bb, ee, mad_low, med_rms
-                        )
-                        comp_data["error"]["blink_ratio"] = b_ratio
-                        comp_data["error"]["emg_ratio"] = e_ratio
-
-                    if reason == "component_window_contaminated" and event.base_metrics:
-                        mad_low, med_rms = event.base_metrics
-                        b_ratio, e_ratio = self._artifact_ratios(
-                            y_blink, y_emg, mad_low, med_rms
                         )
                         comp_data["error"]["blink_ratio"] = b_ratio
                         comp_data["error"]["emg_ratio"] = e_ratio
@@ -503,6 +599,9 @@ class OscErpServer:
         logger: Optional[logging.Logger] = None,
         on_update: Optional[Callable[[dict], None]] = None,
         eeg_started: Optional[threading.Event] = None,
+        use_artifact_detection: bool = True,
+        notch_hz: float = 50.0,
+        notch_q: float = 30.0,
     ) -> None:
         from pythonosc.dispatcher import Dispatcher
         from pythonosc.osc_server import ThreadingOSCUDPServer
@@ -538,6 +637,9 @@ class OscErpServer:
 
         self._tmin, self._tmax, self._baseline = tmin, tmax, baseline
         self._components_to_calculate = components_to_calculate
+        self._use_artifact_detection = use_artifact_detection
+        self._notch_hz = notch_hz
+        self._notch_q = notch_q
 
     @property
     def effective_fs(self) -> float:
@@ -581,6 +683,9 @@ class OscErpServer:
                 baseline=self._baseline,
                 on_publish=self._publish_update,
                 components_to_calculate=self._components_to_calculate,
+                use_artifact_detection=self._use_artifact_detection,
+                notch_hz=self._notch_hz,
+                notch_q=self._notch_q,
             )
         self._q.put(lambda: self.epocher.ingest_event(code))
 
@@ -632,6 +737,9 @@ class OscErpServer:
                     baseline=self._baseline,
                     on_publish=self._publish_update,
                     components_to_calculate=self._components_to_calculate,
+                    use_artifact_detection=self._use_artifact_detection,
+                    notch_hz=self._notch_hz,
+                    notch_q=self._notch_q,
                 )
             self._q.put(lambda: self.epocher.ingest_chunk(samples))
         except Exception as e:
