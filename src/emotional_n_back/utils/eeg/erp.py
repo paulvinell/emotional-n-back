@@ -9,12 +9,16 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 from numpy.typing import NDArray
 from scipy.signal import butter, iirnotch, sosfilt, tf2sos
+
+from emotional_n_back.utils.streaming.buffer import RingBuffer
+from emotional_n_back.utils.streaming.resampler import Resampler
 
 # ----------------------- Configuration -----------------------
 
@@ -51,75 +55,26 @@ class PendingEvent:
     base_artifacts: Optional[Tuple[NDArray, NDArray]] = None
 
 
-@dataclass
-class RingBuffer:
-    """Fixed-size ring buffer for single-channel float64 samples."""
-
-    capacity: int
-    buf: NDArray[np.float64]
-    start_idx: int = 0  # global sample index corresponding to buf[0]
-    write_pos: int = 0
-    n_written: int = 0
-
-    @classmethod
-    def with_capacity(cls, capacity: int) -> "RingBuffer":
-        return cls(capacity=capacity, buf=np.zeros(capacity, dtype=np.float64))
-
-    def append(self, x: NDArray[np.float64]) -> None:
-        """Append 1-D array of samples."""
-        n = int(x.shape[0])
-        for i in range(n):
-            self.buf[self.write_pos] = float(x[i])
-            self.write_pos = (self.write_pos + 1) % self.capacity
-            self.n_written += 1
-            if self.n_written > self.capacity:
-                self.start_idx += 1
-
-    def has_range(self, start_idx: int, end_idx: int) -> bool:
-        """Return True if [start_idx, end_idx) is fully available."""
-        if end_idx <= start_idx:
-            return False
-        earliest = self.start_idx
-        latest = self.start_idx + min(self.n_written, self.capacity)
-        return start_idx >= earliest and end_idx <= latest
-
-    def get_range(self, start_idx: int, end_idx: int) -> NDArray[np.float64]:
-        """Materialize [start_idx, end_idx) into a 1-D array."""
-        if end_idx <= start_idx:
-            raise ValueError("end_idx must be greater than start_idx")
-        if not self.has_range(start_idx, end_idx):
-            raise ValueError("Requested range not fully available in buffer")
-        L = end_idx - start_idx
-        out = np.empty(L, dtype=np.float64)
-        for i in range(L):
-            idx = (start_idx - self.start_idx + i) % self.capacity
-            out[i] = self.buf[idx]
-        return out
-
-
 # ----------------------- Stream Epocher ----------------------
 
 
 class StreamEpocher:
     """
-    Online epocher for single-channel EEG.
+    Online epocher for single-channel EEG, operating on a uniform timeline.
 
-    - Maintains a ring buffer of recent samples.
-    - Accepts chunks of raw samples; applies causal band-pass filtering.
+    - Maintains ring buffers of uniformly sampled data.
+    - Accepts chunks of uniformly sampled data; applies causal filtering.
     - Accepts events and publishes ERP components (P1, N1, etc.) as soon as their
       respective time windows are available.
-    - Optionally maintains a running average of the full ERP waveform.
+    - Rejects epochs that contain gaps (NaNs) or are too close to them.
     """
 
     def __init__(
         self,
-        fs: float,
+        fs_target: float,
         tmin: float = -0.2,
         tmax: float = 0.8,
         baseline: Tuple[Optional[float], Optional[float]] = (None, 0.0),
-        hp: float = 0.1,
-        lp: float = 30.0,
-        extra_seconds: float = 2.0,
         component_specs: Optional[List[Tuple[str, Tuple[float, float], str]]] = None,
         components_to_calculate: Optional[List[str]] = None,
         logger: Optional[logging.Logger] = None,
@@ -127,22 +82,22 @@ class StreamEpocher:
         use_artifact_detection: bool = True,
         blink_threshold_mult: Tuple[float, float] = (10.0, 7.0),
         emg_threshold_mult: Tuple[float, float] = (8.0, 5.0),
-        notch_hz: float = 50.0,  # Mandatory 50/60 Hz notch
-        notch_q: float = 30.0,  # Quality factor for the notch filter
-        trim_s: float = 0.05,  # Seconds to trim from artifact window edges
-        blink_env_s: float = 0.03,  # Blink envelope window
-        emg_rms_s: float = 0.08,  # EMG RMS window
+        notch_hz: float = 50.0,
+        notch_q: float = 30.0,
+        trim_s: float = 0.05,
+        blink_env_s: float = 0.03,
+        emg_rms_s: float = 0.08,
+        warmup_s: float = 0.1,
     ) -> None:
-        assert fs > 0, "Sampling rate fs must be positive"
+        assert fs_target > 0, "Target sampling rate must be positive"
         if notch_hz not in (50.0, 60.0):
             raise ValueError("notch_hz must be 50.0 or 60.0")
-        # Ensure notch frequency is safely below Nyquist to avoid instability
-        if notch_hz >= fs * 0.45:
+        if notch_hz >= fs_target * 0.45:
             raise ValueError(
-                f"notch_hz ({notch_hz}) must be less than 0.45 * fs ({0.45 * fs})"
+                f"notch_hz ({notch_hz}) must be less than 0.45 * fs_target ({0.45 * fs_target})"
             )
 
-        self.fs = float(fs)
+        self.fs = float(fs_target)  # Use fs_target internally
         self.tmin = float(tmin)
         self.tmax = float(tmax)
         self.baseline = baseline
@@ -156,6 +111,7 @@ class StreamEpocher:
         self.trim_s = trim_s
         self.blink_env_s = blink_env_s
         self.emg_rms_s = emg_rms_s
+        self.warmup_s = warmup_s
 
         # Store component specs in a dict for easy lookup
         specs_to_use = component_specs or COMPONENT_SPECS
@@ -163,7 +119,7 @@ class StreamEpocher:
             specs_to_use = [s for s in specs_to_use if s[0] in components_to_calculate]
         self.component_specs = {s[0]: s for s in specs_to_use}
 
-        # Pre-compute scoring filters
+        # Pre-compute scoring filters at the target sampling rate
         self.scoring_filters = {}
         for comp_name, (low, high) in COMPONENT_SCORING_SPECS.items():
             if comp_name in self.component_specs:
@@ -183,8 +139,8 @@ class StreamEpocher:
                     )
 
         # Buffer sized for epoch window + a safety margin
-        cap = int((tmax - tmin + extra_seconds) * fs)
-        cap = max(cap, 1)
+        buffer_duration_s = tmax - tmin + 2.0  # 2s safety margin
+        cap = int(buffer_duration_s * self.fs)
         self.rb_raw = RingBuffer.with_capacity(capacity=cap)
         self.rb_erp = RingBuffer.with_capacity(capacity=cap)
 
@@ -195,23 +151,27 @@ class StreamEpocher:
             self.rb_comp[comp_name] = RingBuffer.with_capacity(capacity=cap)
             self.zi_comp[comp_name] = np.zeros((sos.shape[0], 2))
 
-        # Global sample index = number of samples ingested so far
+        # Global sample index on the uniform timeline
         self.global_idx = 0
 
         # Pending events to be processed
         self.events: List[PendingEvent] = []
 
-        # --- Mandatory Notch Filter (for ERP path and artifact checks) ---
+        # Deque to store recent gap end times
+        self.recent_gaps: deque = deque(maxlen=100)
+
+        # --- Filters for the uniform timeline ---
+        hp, lp = 0.1, 30.0  # Fixed ERP band for now
+        nyq = max(self.fs / 2.0, 1.0)
+
+        # Notch filter
         b_notch, a_notch = iirnotch(notch_hz, notch_q, fs=self.fs)
         self.sos_notch = tf2sos(b_notch, a_notch)
         self.filt_zi_notch = np.zeros((self.sos_notch.shape[0], 2))
 
-        # --- Stream ERP Band Filter (for ERP buffer) ---
-        nyq = max(fs / 2.0, 1.0)
+        # ERP band-pass filter
         low = max(hp, 0.01) / nyq
         high = min(lp, nyq - 1e-6) / nyq
-        if not (0 < low < high < 1):
-            raise ValueError(f"Invalid band [{hp}, {lp}] for fs={fs}")
         self.sos_erp = butter(4, [low, high], btype="band", output="sos")
         self.filt_zi_erp = np.zeros((self.sos_erp.shape[0], 2))
 
@@ -226,13 +186,44 @@ class StreamEpocher:
             self.zi_emg = np.zeros((self.sos_emg.shape[0], 2))
 
         # Epoch time base (constant length)
-        self.n_pre = int(round(-tmin * fs))
-        self.n_post = int(round(tmax * fs))
+        self.n_pre = int(round(-tmin * self.fs))
+        self.n_post = int(round(tmax * self.fs))
         self.epoch_len = self.n_pre + self.n_post
 
         # Logging throttle
         self._last_log_time = 0
         self._log_interval_s = 5.0  # Log max once every 5s
+
+    def has_nan_or_gap(self, start_idx: int, end_idx: int) -> bool:
+        """Check if a window in the raw uniform buffer contains NaNs."""
+        if not self.rb_raw.has_range(start_idx, end_idx):
+            return True  # Data not even available
+        epoch_raw = self.rb_raw.get_range(start_idx, end_idx)
+        return bool(np.isnan(epoch_raw).any())
+
+    def reset_filters(self):
+        """Reset all causal filter states after a gap."""
+        self.filt_zi_notch.fill(0)
+        self.filt_zi_erp.fill(0)
+        if self.use_artifact_detection:
+            self.zi_blink.fill(0)
+            self.zi_emg.fill(0)
+        for zi in self.zi_comp.values():
+            zi.fill(0)
+
+    def set_recent_gaps(self, recent_gaps: deque):
+        """Set the deque of recent gap end times."""
+        self.recent_gaps = recent_gaps
+
+    def is_in_warmup(self, start_idx: int, end_idx: int) -> bool:
+        """Check if a window overlaps with a post-gap warmup period."""
+        start_time = start_idx / self.fs
+        end_time = end_idx / self.fs
+        for gap_end_t in self.recent_gaps:
+            warmup_end_t = gap_end_t + self.warmup_s
+            if start_time < warmup_end_t and end_time > gap_end_t:
+                return True
+        return False
 
     # ------------------ new artifact detection helpers ------------------
 
@@ -291,23 +282,16 @@ class StreamEpocher:
             rms_e.max() / (med_rms + EPS)
         )
 
-    # ------------------ ingesting data & events ------------------
-
-    def ingest_chunk(
-        self,
-        samples: NDArray[np.float64],
-    ) -> None:
-        """
-        Ingest a raw chunk of samples.
-        """
+    def ingest_chunk(self, samples: NDArray[np.float64]) -> None:
+        """Ingest a chunk of uniformly sampled data."""
         x = np.asarray(samples, dtype=np.float64)
         if x.ndim != 1:
             raise ValueError("Samples must be a 1-D array")
 
-        # RAW buffer: store unmodified data for artifact detection
+        # Store raw uniform data
         self.rb_raw.append(x)
 
-        # ERP buffer: apply notch and stream band-pass filters sequentially
+        # Filter and store ERP-band data
         y, self.filt_zi_notch = sosfilt(self.sos_notch, x, zi=self.filt_zi_notch)
         y, self.filt_zi_erp = sosfilt(self.sos_erp, y, zi=self.filt_zi_erp)
         self.rb_erp.append(y)
@@ -318,25 +302,14 @@ class StreamEpocher:
             self.rb_comp[comp_name].append(yc)
 
         self.global_idx += x.size
-
-        # After each chunk, check if any components are ready
         self._check_and_publish_components()
 
-    def ingest_event(self, code: str) -> None:
-        """
-        Register an event. The event is timestamped at the current end of the stream.
-        """
-        self.ingest_event_at(self.global_idx, code)
-
-    def ingest_event_at(self, global_sample_idx: int, code: str) -> None:
-        """
-        Register an event with a precise sample index.
-        """
-        pending_components = list(self.component_specs.keys())
+    def ingest_event_at(self, ev_idx: int, code: str) -> None:
+        """Register an event with a precise uniform sample index."""
         event = PendingEvent(
-            ev_idx=int(global_sample_idx),
+            ev_idx=int(ev_idx),
             code=str(code),
-            pending_components=pending_components,
+            pending_components=list(self.component_specs.keys()),
         )
         self.events.append(event)
 
@@ -381,6 +354,19 @@ class StreamEpocher:
         """
         Check all pending events and publish any components that have become ready.
         """
+        # Drop events whose latest needed sample is already out of buffer
+        earliest = self.rb_erp.start_idx
+        self.events = [e for e in self.events if (e.ev_idx + self.n_post) > earliest]
+
+        # Optional: hard cap to prevent runaway growth
+        MAX_EVENTS = 2048
+        if len(self.events) > MAX_EVENTS:
+            overflow = len(self.events) - MAX_EVENTS
+            self.logger.warning(
+                "Pruning %d excess events (cap=%d)", overflow, MAX_EVENTS
+            )
+            self.events = self.events[-MAX_EVENTS:]
+
         self.events.sort(key=lambda e: e.ev_idx)
 
         for event in self.events:
@@ -391,55 +377,67 @@ class StreamEpocher:
             # --- 1. Event-level artifact processing (if enabled) ---
             event_clean_flag: Union[str, bool] = True
             if self.use_artifact_detection:
-                base_metrics = event.base_metrics
-                if base_metrics is None:
-                    event_clean_flag = "unknown"
+                i0, i1 = self._baseline_indices(event.ev_idx)
+                if self.has_nan_or_gap(i0, i1):
+                    event_clean_flag = False
+                    reason = "gap_in_baseline"
+                elif self.is_in_warmup(i0, i1):
+                    event_clean_flag = False
+                    reason = "post_gap_warmup"
                 else:
-                    mad_low, med_rms = base_metrics
-                    i0, i1 = self._baseline_indices(event.ev_idx)
+                    event.base_metrics = self._baseline_metrics(i0, i1)
+                    base_metrics = event.base_metrics
+                    if base_metrics is None:
+                        event_clean_flag = "unknown"
+                    else:
+                        mad_low, med_rms = base_metrics
 
-                    # Final baseline check for event-level flag
-                    # A) Baseline-only detection, no pad/back-contamination
-                    base_raw = self.rb_raw.get_range(i0, i1)
-                    base_notched = sosfilt(self.sos_notch, base_raw.copy())
-                    bb = sosfilt(self.sos_blink, base_notched.copy())
-                    ee = sosfilt(self.sos_emg, base_notched.copy())
-                    event.base_artifacts = (bb, ee)  # Cache for ratio calculation
+                        # Final baseline check for event-level flag
+                        # A) Baseline-only detection, no pad/back-contamination
+                        base_raw = self.rb_raw.get_range(i0, i1)
+                        base_notched = sosfilt(self.sos_notch, base_raw.copy())
+                        bb = sosfilt(self.sos_blink, base_notched.copy())
+                        ee = sosfilt(self.sos_emg, base_notched.copy())
+                        event.base_artifacts = (bb, ee)  # Cache for ratio calculation
 
-                    trim = int(self.trim_s * self.fs)
-                    if len(bb) > 2 * trim:
-                        bb = bb[trim:-trim]
-                    if len(ee) > 2 * trim:
-                        ee = ee[trim:-trim]
+                        trim = int(self.trim_s * self.fs)
+                        if len(bb) > 2 * trim:
+                            bb = bb[trim:-trim]
+                        if len(ee) > 2 * trim:
+                            ee = ee[trim:-trim]
 
-                    # Blink baseline check with persistence (no pads applied beyond the baseline slice itself)
-                    w_b = max(1, int(self.blink_env_s * self.fs))
-                    env_b = np.convolve(np.abs(bb), np.ones(w_b) / w_b, mode="same")
-                    blink_in_baseline = bool(
-                        np.any(env_b > self.blink_threshold_mult_high * mad_low)
-                    )
-
-                    # EMG baseline check with persistence
-                    w_e = max(1, int(self.emg_rms_s * self.fs))
-                    rms_e = np.sqrt(np.convolve(ee**2, np.ones(w_e) / w_e, mode="same"))
-                    thr_e = self.emg_threshold_mult_high * med_rms
-                    above_e = rms_e > thr_e
-                    k = max(1, int(0.04 * self.fs))  # ≥40 ms continuous
-                    emg_in_baseline = bool(
-                        len(above_e) >= k
-                        and np.any(
-                            np.convolve(above_e.astype(int), np.ones(k), "same") >= k
+                        # Blink baseline check with persistence (no pads applied beyond the baseline slice itself)
+                        w_b = max(1, int(self.blink_env_s * self.fs))
+                        env_b = np.convolve(np.abs(bb), np.ones(w_b) / w_b, mode="same")
+                        blink_in_baseline = bool(
+                            np.any(env_b > self.blink_threshold_mult_high * mad_low)
                         )
-                    )
 
-                    # Decide baseline clean WITHOUT using artifact_events pads
-                    event_clean_flag = not (blink_in_baseline or emg_in_baseline)
+                        # EMG baseline check with persistence
+                        w_e = max(1, int(self.emg_rms_s * self.fs))
+                        rms_e = np.sqrt(
+                            np.convolve(ee**2, np.ones(w_e) / w_e, mode="same")
+                        )
+                        thr_e = self.emg_threshold_mult_high * med_rms
+                        above_e = rms_e > thr_e
+                        k = max(1, int(0.04 * self.fs))  # ≥40 ms continuous
+                        emg_in_baseline = bool(
+                            len(above_e) >= k
+                            and np.any(
+                                np.convolve(above_e.astype(int), np.ones(k), "same")
+                                >= k
+                            )
+                        )
+
+                        # Decide baseline clean WITHOUT using artifact_events pads
+                        event_clean_flag = not (blink_in_baseline or emg_in_baseline)
 
             # --- 2. Per-component processing ---
             remaining_components = []
             for comp_name in event.pending_components:
                 spec = self.component_specs[comp_name]
                 _, (w0, w1), _ = spec
+                comp_start_idx = event.ev_idx + int(round(w0 * self.fs))
                 comp_end_idx = event.ev_idx + int(round(w1 * self.fs))
 
                 if not self.rb_erp.has_range(event.ev_idx - self.n_pre, comp_end_idx):
@@ -451,7 +449,18 @@ class StreamEpocher:
                 reason = None
                 final_clean_flag = event_clean_flag
 
-                if self.use_artifact_detection:
+                # Check for gaps first, as they are a type of artifact
+                if self.has_nan_or_gap(comp_start_idx, comp_end_idx):
+                    self.logger.warning(
+                        "Processing component %s for event %s with gap in window.",
+                        comp_name,
+                        event.code,
+                    )
+                    is_clean = False
+                    reason = "gap_in_component"
+                    final_clean_flag = False
+
+                if self.use_artifact_detection and is_clean:  # Only check others if no gap
                     if event_clean_flag == "unknown":
                         now = time.time()
                         if now - self._last_log_time > self._log_interval_s:
@@ -580,18 +589,15 @@ class StreamEpocher:
 
 class OscErpServer:
     """
-    Minimal OSC server that accepts:
-      /eeg   [samples]
-    Events are ingested via the `ingest_event` method.
-    Emits JSON summaries to stdout as soon as running ERPs update.
+    Minimal OSC server that accepts /eeg messages, resamples the data to a
+    uniform timeline, and forwards it to the StreamEpocher.
     """
 
     def __init__(
         self,
         host: str,
         port: int,
-        fs: Optional[float] = None,
-        fs_estimation_duration_s: float = 5.0,
+        fs_target: float = 256.0,
         tmin: float = -0.2,
         tmax: float = 0.8,
         baseline: Tuple[Optional[float], Optional[float]] = (None, 0.0),
@@ -602,28 +608,41 @@ class OscErpServer:
         use_artifact_detection: bool = True,
         notch_hz: float = 50.0,
         notch_q: float = 30.0,
+        gap_threshold_s: float = 0.02,
+        warmup_s: float = 0.1,
     ) -> None:
         from pythonosc.dispatcher import Dispatcher
         from pythonosc.osc_server import ThreadingOSCUDPServer
 
         self.logger = logger or logging.getLogger("osc_erp")
-        self.fs = fs
         self.epocher: Optional[StreamEpocher] = None
         self.on_update = on_update
         self.eeg_started = eeg_started
 
-        self._q = queue.Queue()  # queue of callables to serialize ingestion
+        self._q = queue.Queue()  # For serializing calls to the epocher
 
-        # fs estimation
-        self.fs_estimation_duration_s = fs_estimation_duration_s
-        self.is_estimating_fs = self.fs is None
-        self.fs_estimation_start_time: Optional[float] = None
-        self.fs_estimation_samples = 0
-        self.initial_fs_est: Optional[float] = None
-        self.n_samples = 0
-        self.last_time = None
-        self.fs_est = 0.0
-        self.alpha = 0.1  # EMA smoothing factor
+        # Instantiate the resampler
+        self.resampler = Resampler(
+            fs_target=fs_target,
+            gap_threshold_s=gap_threshold_s,
+            warmup_s=warmup_s,
+            on_resampled_chunk=self._handle_resampled_chunk,
+            on_gap=lambda: self._q.put(self.epocher.reset_filters),
+        )
+
+        # Instantiate the epocher
+        self.epocher = StreamEpocher(
+            fs_target=fs_target,
+            tmin=tmin,
+            tmax=tmax,
+            baseline=baseline,
+            on_publish=self._publish_update,
+            components_to_calculate=components_to_calculate,
+            use_artifact_detection=use_artifact_detection,
+            notch_hz=notch_hz,
+            notch_q=notch_q,
+            warmup_s=warmup_s,
+        )
 
         # Build OSC dispatcher
         disp = Dispatcher()
@@ -631,65 +650,42 @@ class OscErpServer:
 
         self._server = ThreadingOSCUDPServer((host, port), disp)
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
-
-        # Periodic worker thread to process queue & produce updates
         self._worker = threading.Thread(target=self._work_loop, daemon=True)
 
-        self._tmin, self._tmax, self._baseline = tmin, tmax, baseline
-        self._components_to_calculate = components_to_calculate
-        self._use_artifact_detection = use_artifact_detection
-        self._notch_hz = notch_hz
-        self._notch_q = notch_q
-
-    @property
-    def effective_fs(self) -> float:
-        """Return the estimated sampling rate, or the fixed one if provided."""
-        if self.fs is not None:
-            return self.fs
-        if self.initial_fs_est is not None:
-            return self.initial_fs_est
-        return self.fs_est
-
-    @property
-    def fs_estimation_remaining_s(self) -> float:
-        if not self.is_estimating_fs or self.fs_estimation_start_time is None:
-            return 0.0
-        elapsed = time.time() - self.fs_estimation_start_time
-        return max(0.0, self.fs_estimation_duration_s - elapsed)
-
-    @property
-    def fs_estimation_countdown_s(self) -> float:
-        return self.fs_estimation_duration_s
-
-    @property
-    def continuous_fs_est(self) -> float:
-        return self.fs_est
+    def _handle_resampled_chunk(self, chunk: NDArray[np.float64]):
+        """Callback for when the resampler has a new chunk of uniform data."""
+        if self.epocher:
+            self._q.put(lambda: self.epocher.ingest_chunk(chunk))
 
     def _publish_update(self, update: dict):
+        """Add stream health info and publish the update."""
+        update["stream_health"] = {
+            "fs_target": self.resampler.fs_target,
+            "fs_obs": self.resampler.fs_obs,
+            "drift_ratio": self.resampler.drift_ratio,
+            # Add gap info here later
+        }
         print(json.dumps({"type": "erp_update", **update}), flush=True)
         if self.on_update:
             self.on_update(update)
 
     def ingest_event(self, code: str):
-        """Ingest an event from within the same process."""
-        if self.epocher is None:
-            if self.effective_fs <= 0:
-                self.logger.warning("Cannot create epocher, fs=%.2f", self.effective_fs)
-                return
-            self.epocher = StreamEpocher(
-                fs=self.effective_fs,
-                tmin=self._tmin,
-                tmax=self._tmax,
-                baseline=self._baseline,
-                on_publish=self._publish_update,
-                components_to_calculate=self._components_to_calculate,
-                use_artifact_detection=self._use_artifact_detection,
-                notch_hz=self._notch_hz,
-                notch_q=self._notch_q,
-            )
-        self._q.put(lambda: self.epocher.ingest_event(code))
+        t_event = time.time()
+        idx = self.resampler.transport_to_uniform_idx(t_event)
 
-    # ------------------ OSC handlers ------------------
+        if idx is None:
+            # Resampler not anchored yet; retry once it produces output
+            self._q.put(lambda: self._ingest_event_when_ready(t_event, code))
+        else:
+            self._q.put(lambda: self.epocher.ingest_event_at(idx, code))
+
+    def _ingest_event_when_ready(self, t_event: float, code: str):
+        idx = self.resampler.transport_to_uniform_idx(t_event)
+        if idx is None:
+            # still not ready; requeue
+            self._q.put(lambda: self._ingest_event_when_ready(t_event, code))
+            return
+        self.epocher.ingest_event_at(idx, code)
 
     def _handle_eeg(self, addr: str, *args):
         """Accepts /eeg [samples] messages."""
@@ -697,51 +693,14 @@ class OscErpServer:
             self.eeg_started.set()
         try:
             samples = np.asarray(args, dtype=np.float64)
+            t0 = time.time()
+            dt = 1.0 / self.resampler.fs_target
+            t_chunk = t0 + np.arange(len(samples), dtype=np.float64) * dt
 
-            # Update sampling rate estimate
-            if self.is_estimating_fs:
-                now = time.time()
-                if self.fs_estimation_start_time is None:
-                    self.fs_estimation_start_time = now
-                self.fs_estimation_samples += samples.size
-                elapsed = now - self.fs_estimation_start_time
-                if elapsed > 0:
-                    self.fs_est = self.fs_estimation_samples / elapsed
-                if elapsed > self.fs_estimation_duration_s:
-                    self.is_estimating_fs = False
-                    self.initial_fs_est = self.fs_est
-                    self.logger.info(
-                        "Estimated sampling rate: %.2f Hz", self.initial_fs_est
-                    )
-            now = time.time()
-            if self.last_time is not None:
-                delta_t = now - self.last_time
-                if delta_t > 1e-6:
-                    current_fs = samples.size / delta_t
-                    if self.fs_est <= 0:
-                        self.fs_est = current_fs
-                    else:
-                        self.fs_est = (self.alpha * current_fs) + (
-                            1.0 - self.alpha
-                        ) * self.fs_est
-            self.last_time = now
+            self.resampler.ingest_chunk(t_chunk, samples)
+            if self.epocher:
+                self.epocher.set_recent_gaps(self.resampler.recent_gaps)
 
-            if self.epocher is None:
-                if self.effective_fs <= 0:
-                    # Can't create epocher yet, fs is not known
-                    return
-                self.epocher = StreamEpocher(
-                    fs=self.effective_fs,
-                    tmin=self._tmin,
-                    tmax=self._tmax,
-                    baseline=self._baseline,
-                    on_publish=self._publish_update,
-                    components_to_calculate=self._components_to_calculate,
-                    use_artifact_detection=self._use_artifact_detection,
-                    notch_hz=self._notch_hz,
-                    notch_q=self._notch_q,
-                )
-            self._q.put(lambda: self.epocher.ingest_chunk(samples))
         except Exception as e:
             self.logger.exception("Failed to handle /eeg: %s", e)
 

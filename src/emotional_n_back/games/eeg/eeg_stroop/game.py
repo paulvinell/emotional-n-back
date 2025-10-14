@@ -51,7 +51,6 @@ class EEGStroopGame:
         stimulus_intro_ms: int = 500,
         window_size=(900, 650),
         fs: Optional[float] = None,
-        fs_estimation_duration_s: float = 5.0,
         initial_calibration_trials: int = 10,
         recalibration_interval: int = 10,
         outlier_std_devs: Optional[float] = 3.0,
@@ -77,12 +76,8 @@ class EEGStroopGame:
         self.trial_num = 0
         self.score = 0
         self._img_cache: dict[str, pygame.Surface] = {}
-        if fs is None:
-            self.state = GameState.ESTIMATING_FS
-        else:
-            self.state = GameState.WAIT_EEG
+        self.state = GameState.WAIT_EEG
         self.trial_start_t = 0
-        self.estimation_complete_start_t = 0
         self.image_surface = None
         self.audio_sound = None
         self.event_code = ""
@@ -100,8 +95,7 @@ class EEGStroopGame:
             erp_component=self.erp_component,
             host="127.0.0.1",
             port=5005,
-            fs=fs,
-            fs_estimation_duration_s=fs_estimation_duration_s,
+            fs_target=fs,
         )
 
         self.calibration = Calibration()
@@ -118,11 +112,7 @@ class EEGStroopGame:
         self.erp_adapter.start()
 
     def update(self):
-        if self.state == GameState.ESTIMATING_FS:
-            self.state = self._estimating_fs()
-        elif self.state == GameState.ESTIMATION_COMPLETE:
-            self.state = self._estimation_complete()
-        elif self.state == GameState.WAIT_EEG:
+        if self.state == GameState.WAIT_EEG:
             self.state = self._wait_eeg()
         elif self.state == GameState.PREPARE_TRIAL:
             self.state = self._prepare_trial()
@@ -135,17 +125,6 @@ class EEGStroopGame:
         elif self.state == GameState.FEEDBACK:
             self.state = self._feedback()
 
-    def _estimating_fs(self):
-        if self.erp_adapter.is_estimating_fs:
-            return GameState.ESTIMATING_FS
-        self.estimation_complete_start_t = pygame.time.get_ticks()
-        return GameState.ESTIMATION_COMPLETE
-
-    def _estimation_complete(self):
-        if pygame.time.get_ticks() - self.estimation_complete_start_t > 2000:
-            return GameState.WAIT_EEG
-        return GameState.ESTIMATION_COMPLETE
-
     def _wait_eeg(self):
         if self.erp_adapter.eeg_started.is_set():
             return GameState.PREPARE_TRIAL
@@ -156,7 +135,6 @@ class EEGStroopGame:
             self.stats = self.calibration.compute(self.outlier_std_devs)
             self.calibration.reset_batch()
             self.recompute_stats_next_trial = False
-
         self.reward = Reward.NONE
         visual_sentiment = random.choice(self.sentiments)
         audio_sentiment = random.choice(self.sentiments)
@@ -238,7 +216,6 @@ class EEGStroopGame:
         data = {
             "trial_num": self.trial_num,
             "is_calibrating": self.stats is None,
-            "is_estimating_fs": self.state == GameState.ESTIMATING_FS,
             "stimulus_rect": self.stimulus_rect,
             "reward": self.reward,
             "score": self.score,
@@ -248,16 +225,9 @@ class EEGStroopGame:
             "continuous_fs_est": self.erp_adapter.continuous_fs_est,
         }
 
-        if self.state == GameState.ESTIMATING_FS:
-            data["fs_estimation_remaining_s"] = (
-                self.erp_adapter.fs_estimation_remaining_s
-            )
-            data["fs_estimation_countdown_s"] = (
-                self.erp_adapter.fs_estimation_countdown_s
-            )
-
         if self.state != GameState.INTRO:
             data["image_surface"] = self.image_surface
+
         return data
 
     def get_final_screen_data(self):

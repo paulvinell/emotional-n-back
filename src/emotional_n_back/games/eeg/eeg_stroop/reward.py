@@ -1,13 +1,15 @@
-
-from enum import Enum, auto
 from dataclasses import dataclass
-from typing import Optional, List, Tuple
+from enum import Enum, auto
+from typing import List, Optional, Tuple
+
 import numpy as np
+
 
 class Reward(Enum):
     SUCCESS = auto()
     FAILURE = auto()
     NONE = auto()
+
 
 @dataclass
 class Stats:
@@ -16,6 +18,7 @@ class Stats:
     mean_lat: float
     std_lat: float
     threshold_amp: float
+
 
 class Calibration:
     def __init__(self):
@@ -45,10 +48,7 @@ class Calibration:
             filtered_data = self.calibration_data
 
         if len(filtered_data) < 2 and len(self.calibration_data) >= 2:
-            deviations = [
-                (d, abs(d[0] - mean_amp_cal))
-                for d in self.calibration_data
-            ]
+            deviations = [(d, abs(d[0] - mean_amp_cal)) for d in self.calibration_data]
             deviations.sort(key=lambda x: x[1])
             final_data = [d[0] for d in deviations[:2]]
         else:
@@ -68,6 +68,7 @@ class Calibration:
 
     def reset_batch(self) -> None:
         self.calibration_data = []
+
 
 class ZScorePolicy:
     def __init__(self, success=0.5, failure=-0.5):

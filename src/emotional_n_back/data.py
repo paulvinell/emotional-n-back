@@ -31,6 +31,7 @@ class KDEFLoader:
             raise ValueError(
                 f"Emotion directory {emotion_dir} does not exist or is not a directory."
             )
+
         return sorted([p for p in emotion_dir.iterdir() if p.is_file()])
 
     def get_random_image(self, emotion: str):

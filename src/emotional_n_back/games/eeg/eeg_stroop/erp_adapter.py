@@ -1,10 +1,10 @@
-
-from dataclasses import dataclass
-from typing import Optional, Dict
 import queue
 import threading
+from dataclasses import dataclass
+from typing import Dict, Optional
 
 from emotional_n_back.utils.eeg.erp import OscErpServer
+
 
 @dataclass
 class ErpUpdate:
@@ -14,39 +14,36 @@ class ErpUpdate:
     lat: Optional[float]
     raw: Dict  # full original payload for debugging
 
+
 class ErpAdapter:
-    def __init__(self, erp_component: str, fs: Optional[float] = None, fs_estimation_duration_s: float = 3.0, **kwargs):
+    def __init__(self, erp_component: str, fs_target: float = 256.0, **kwargs):
         self.erp_component = erp_component
         self._updates = queue.Queue()
         self.eeg_started = threading.Event()
+
         self._server = OscErpServer(
-            fs=fs,
-            fs_estimation_duration_s=fs_estimation_duration_s,
+            fs_target=fs_target,
             on_update=self._handle_erp_update,
             components_to_calculate=[erp_component],
             eeg_started=self.eeg_started,
-            **kwargs
+            **kwargs,
         )
 
     @property
-    def is_estimating_fs(self) -> bool:
-        return self._server.is_estimating_fs
-
-    @property
     def effective_fs(self) -> float:
-        return self._server.effective_fs
+        return self._server.resampler.fs_obs
 
     @property
-    def fs_estimation_remaining_s(self) -> float:
-        return self._server.fs_estimation_remaining_s
-
-    @property
-    def fs_estimation_countdown_s(self) -> float:
-        return self._server.fs_estimation_countdown_s
+    def stream_health(self) -> dict:
+        return {
+            "fs_target": self._server.resampler.fs_target,
+            "fs_obs": self._server.resampler.fs_obs,
+            "drift_ratio": self._server.resampler.drift_ratio,
+        }
 
     @property
     def continuous_fs_est(self) -> float:
-        return self._server.continuous_fs_est
+        return self._server.resampler.fs_obs
 
     def _handle_erp_update(self, update: dict):
         component_data = update.get("component", {}).get(self.erp_component, {})
@@ -68,7 +65,9 @@ class ErpAdapter:
     def ingest_event(self, code: str) -> None:
         self._server.ingest_event(code)
 
-    def poll_update(self, code: Optional[str] = None, timeout: float = 0.0) -> Optional[ErpUpdate]:
+    def poll_update(
+        self, code: Optional[str] = None, timeout: float = 0.0
+    ) -> Optional[ErpUpdate]:
         try:
             update = self._updates.get(block=timeout > 0, timeout=timeout)
             if code is None or update.code == code:

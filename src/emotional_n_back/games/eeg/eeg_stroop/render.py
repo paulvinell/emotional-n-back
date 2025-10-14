@@ -1,8 +1,10 @@
-import pygame
 from typing import Optional
-from .reward import Reward
 
+import pygame
+
+from .reward import Reward
 from .state import GameState
+
 
 class GameRenderer:
     def __init__(self, window_size=(900, 650)):
@@ -17,11 +19,8 @@ class GameRenderer:
     def render_game(self, game):
         self.screen.fill((20, 22, 26))
         trial_data = game.get_trial_data()
-        if game.state == GameState.ESTIMATING_FS:
-            self.draw_estimating_fs(trial_data)
-        elif game.state == GameState.ESTIMATION_COMPLETE:
-            self.draw_estimation_complete(trial_data)
-        elif game.state == GameState.WAIT_EEG:
+
+        if game.state == GameState.WAIT_EEG:
             self.draw_waiting_eeg()
         elif game.state == GameState.INTRO:
             self.draw_intro(trial_data)
@@ -34,9 +33,13 @@ class GameRenderer:
     def draw_trial(self, trial_data):
         self.screen.fill((20, 22, 26))
         self.draw_header(trial_data["trial_num"], trial_data["is_calibrating"])
-        self.draw_stimulus_box(trial_data["stimulus_rect"], trial_data.get("image_surface"))
+        self.draw_stimulus_box(
+            trial_data["stimulus_rect"], trial_data.get("image_surface")
+        )
         if trial_data.get("reward") is not None:
-            self.draw_feedback_overlay(trial_data["stimulus_rect"], trial_data["reward"])
+            self.draw_feedback_overlay(
+                trial_data["stimulus_rect"], trial_data["reward"]
+            )
         self.draw_scorebar(trial_data["score"], trial_data["scoreable_trial_num"])
         self.draw_fs(trial_data)
         pygame.display.flip()
@@ -56,31 +59,6 @@ class GameRenderer:
         self.screen.blit(text, text_rect)
         pygame.display.flip()
 
-    def draw_estimation_complete(self, trial_data):
-        self.screen.fill((20, 22, 26))
-        fs = trial_data.get("fs", 0)
-        text = self.font_big.render(f"Estimated sampling rate: {fs:.1f} Hz", True, (255, 255, 255))
-        text_rect = text.get_rect(center=self.screen.get_rect().center)
-        self.screen.blit(text, text_rect)
-        pygame.display.flip()
-
-    def draw_estimating_fs(self, trial_data):
-        self.screen.fill((20, 22, 26))
-        remaining_s = trial_data.get("fs_estimation_remaining_s", 0)
-        countdown_s = trial_data.get("fs_estimation_countdown_s", 0)
-        text = self.font_big.render(f"Estimating sampling rate... {remaining_s:.1f}s", True, (255, 255, 255))
-        text_rect = text.get_rect(center=self.screen.get_rect().center)
-        self.screen.blit(text, text_rect)
-
-        progress = 1.0 - (remaining_s / countdown_s)
-        progress_rect = pygame.Rect(text_rect.left, text_rect.bottom + 20, text_rect.width, 10)
-        pygame.draw.rect(self.screen, (60, 60, 65), progress_rect, border_radius=5)
-        progress_width = int(progress_rect.width * progress)
-        pygame.draw.rect(self.screen, (40, 160, 90), (progress_rect.left, progress_rect.top, progress_width, progress_rect.height), border_radius=5)
-
-        self.draw_fs(trial_data)
-        pygame.display.flip()
-
     def draw_header(self, trial_idx: int, calibrating: bool):
         hdr = self.font_big.render(f"Trial {trial_idx + 1}", True, (235, 235, 235))
         self.screen.blit(hdr, (24, 24))
@@ -96,10 +74,7 @@ class GameRenderer:
     def draw_fs(self, trial_data):
         if not trial_data.get("show_fs"):
             return
-        if trial_data.get("is_estimating_fs"):
-            fs = trial_data.get("fs", 0)
-        else:
-            fs = trial_data.get("continuous_fs_est", 0)
+        fs = trial_data.get("continuous_fs_est", 0)
         fs_text = self.font_small.render(f"fs: {fs:.1f} Hz", True, (200, 200, 200))
         text_rect = fs_text.get_rect()
         text_rect.bottomright = self.screen.get_rect().bottomright
@@ -107,7 +82,9 @@ class GameRenderer:
         text_rect.y -= 10
         self.screen.blit(fs_text, text_rect)
 
-    def draw_stimulus_box(self, rect: pygame.Rect, image_surface: Optional[pygame.Surface] = None):
+    def draw_stimulus_box(
+        self, rect: pygame.Rect, image_surface: Optional[pygame.Surface] = None
+    ):
         pygame.draw.rect(self.screen, (60, 60, 65), rect, border_radius=12)
         pygame.draw.rect(self.screen, (160, 160, 170), rect, width=2, border_radius=12)
         if image_surface:
@@ -117,17 +94,19 @@ class GameRenderer:
     def draw_feedback_overlay(self, rect: pygame.Rect, reward: Reward):
         if reward == Reward.NONE:
             return
-        
+
         overlay = pygame.Surface(rect.size, pygame.SRCALPHA)
         fill = (40, 160, 90, 140) if reward == Reward.SUCCESS else (180, 60, 60, 140)
         overlay.fill(fill)
         self.screen.blit(overlay, rect.topleft)
-        
+
     def draw_final_screen(self, final_screen_data):
         self.screen.fill((20, 22, 26))
-        final_trials = max(1, final_screen_data['trial_num'])
-        acc = 100.0 * (final_screen_data['score'] / final_trials)
-        summary = f"Done! Score: {final_screen_data['score']}/{final_trials} ({acc:.1f}%)"
+        final_trials = max(1, final_screen_data["trial_num"])
+        acc = 100.0 * (final_screen_data["score"] / final_trials)
+        summary = (
+            f"Done! Score: {final_screen_data['score']}/{final_trials} ({acc:.1f}%)"
+        )
         s_surf = self.font_big.render(summary, True, (255, 255, 255))
         self.screen.blit(
             s_surf,
