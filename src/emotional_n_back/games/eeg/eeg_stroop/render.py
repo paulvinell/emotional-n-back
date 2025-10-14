@@ -16,12 +16,17 @@ class GameRenderer:
 
     def render_game(self, game):
         self.screen.fill((20, 22, 26))
-        if game.state == GameState.WAIT_EEG:
+        trial_data = game.get_trial_data()
+        if game.state == GameState.ESTIMATING_FS:
+            self.draw_estimating_fs(trial_data)
+        elif game.state == GameState.ESTIMATION_COMPLETE:
+            self.draw_estimation_complete(trial_data)
+        elif game.state == GameState.WAIT_EEG:
             self.draw_waiting_eeg()
         elif game.state == GameState.INTRO:
-            self.draw_intro(game.get_trial_data())
+            self.draw_intro(trial_data)
         elif game.state in [GameState.STIMULUS, GameState.RESPONSE, GameState.FEEDBACK]:
-            self.draw_trial(game.get_trial_data())
+            self.draw_trial(trial_data)
         elif game.state == GameState.FINAL_SCREEN:
             self.draw_final_screen(game.get_final_screen_data())
         pygame.display.flip()
@@ -49,6 +54,31 @@ class GameRenderer:
         text_rect = text.get_rect(center=self.screen.get_rect().center)
         self.screen.fill((20, 22, 26))
         self.screen.blit(text, text_rect)
+        pygame.display.flip()
+
+    def draw_estimation_complete(self, trial_data):
+        self.screen.fill((20, 22, 26))
+        fs = trial_data.get("fs", 0)
+        text = self.font_big.render(f"Estimated sampling rate: {fs:.1f} Hz", True, (255, 255, 255))
+        text_rect = text.get_rect(center=self.screen.get_rect().center)
+        self.screen.blit(text, text_rect)
+        pygame.display.flip()
+
+    def draw_estimating_fs(self, trial_data):
+        self.screen.fill((20, 22, 26))
+        remaining_s = trial_data.get("fs_estimation_remaining_s", 0)
+        countdown_s = trial_data.get("fs_estimation_countdown_s", 0)
+        text = self.font_big.render(f"Estimating sampling rate... {remaining_s:.1f}s", True, (255, 255, 255))
+        text_rect = text.get_rect(center=self.screen.get_rect().center)
+        self.screen.blit(text, text_rect)
+
+        progress = 1.0 - (remaining_s / countdown_s)
+        progress_rect = pygame.Rect(text_rect.left, text_rect.bottom + 20, text_rect.width, 10)
+        pygame.draw.rect(self.screen, (60, 60, 65), progress_rect, border_radius=5)
+        progress_width = int(progress_rect.width * progress)
+        pygame.draw.rect(self.screen, (40, 160, 90), (progress_rect.left, progress_rect.top, progress_width, progress_rect.height), border_radius=5)
+
+        self.draw_fs(trial_data)
         pygame.display.flip()
 
     def draw_header(self, trial_idx: int, calibrating: bool):

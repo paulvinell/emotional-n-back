@@ -495,6 +495,7 @@ class OscErpServer:
         host: str,
         port: int,
         fs: Optional[float] = None,
+        fs_estimation_duration_s: float = 3.0,
         tmin: float = -0.2,
         tmax: float = 0.8,
         baseline: Tuple[Optional[float], Optional[float]] = (None, 0.0),
@@ -515,6 +516,10 @@ class OscErpServer:
         self._q = queue.Queue()  # queue of callables to serialize ingestion
 
         # fs estimation
+        self.fs_estimation_duration_s = fs_estimation_duration_s
+        self.is_estimating_fs = self.fs is None
+        self.fs_estimation_start_time: Optional[float] = None
+        self.fs_estimation_samples = 0
         self.n_samples = 0
         self.last_time = None
         self.fs_est = 0.0
@@ -537,6 +542,17 @@ class OscErpServer:
     def effective_fs(self) -> float:
         """Return the estimated sampling rate, or the fixed one if provided."""
         return self.fs if self.fs is not None else self.fs_est
+
+    @property
+    def fs_estimation_remaining_s(self) -> float:
+        if not self.is_estimating_fs or self.fs_estimation_start_time is None:
+            return 0.0
+        elapsed = time.time() - self.fs_estimation_start_time
+        return max(0.0, self.fs_estimation_duration_s - elapsed)
+
+    @property
+    def fs_estimation_countdown_s(self) -> float:
+        return self.fs_estimation_duration_s
 
     def _publish_update(self, update: dict):
         print(json.dumps({"type": "erp_update", **update}), flush=True)
@@ -569,7 +585,17 @@ class OscErpServer:
             samples = np.asarray(args, dtype=np.float64)
 
             # Update sampling rate estimate
-            if self.fs is None:
+            if self.is_estimating_fs:
+                now = time.time()
+                if self.fs_estimation_start_time is None:
+                    self.fs_estimation_start_time = now
+                self.fs_estimation_samples += samples.size
+                elapsed = now - self.fs_estimation_start_time
+                if elapsed > 0:
+                    self.fs_est = self.fs_estimation_samples / elapsed
+                if elapsed > self.fs_estimation_duration_s:
+                    self.is_estimating_fs = False
+            elif self.fs is None:
                 now = time.time()
                 if self.last_time is not None:
                     delta_t = now - self.last_time

@@ -1,4 +1,5 @@
 import os
+from typing import Optional
 import shutil
 
 import typer
@@ -311,6 +312,9 @@ def eeg_stroop(
     window_size: str = "900,650",
     show_fs: bool = typer.Option(False, "--show-fs", help="Show estimated sampling rate."),
     fs: Optional[float] = typer.Option(None, "--fs", help="Sampling rate of the EEG stream."),
+    fs_estimation_duration_s: float = typer.Option(
+        3.0, help="Duration of the initial sampling rate estimation phase."
+    ),
 ):
     """Run an EEG-integrated sentiment Stroop test."""
     import pygame
@@ -327,6 +331,7 @@ def eeg_stroop(
         window_size=tuple(map(int, window_size.split(','))),
         show_fs=show_fs,
         fs=fs,
+        fs_estimation_duration_s=fs_estimation_duration_s,
     )
     game.start()
 
