@@ -29,6 +29,8 @@ COMPONENT_SPECS: List[Tuple[str, Tuple[float, float], str]] = [
     ("N200", (0.180, 0.300), "neg"),
     ("P300", (0.300, 0.600), "pos"),
     ("LPP", (0.400, 0.800), "pos_mean"),  # mean amplitude over the window
+    ("LPP_early", (0.400, 0.600), "pos_mean"),
+    ("LPP_late", (0.600, 0.800), "pos_mean"),
 ]
 
 # Component scoring filter bands (Hz)
@@ -38,6 +40,8 @@ COMPONENT_SCORING_SPECS = {
     "N200": (1.0, 12.0),
     "P300": (0.1, 12.0),
     "LPP": (0.1, 8.0),
+    "LPP_early": (0.1, 8.0),
+    "LPP_late": (0.1, 8.0),
 }
 
 # Numerical stability constant
@@ -460,7 +464,9 @@ class StreamEpocher:
                     reason = "gap_in_component"
                     final_clean_flag = False
 
-                if self.use_artifact_detection and is_clean:  # Only check others if no gap
+                if (
+                    self.use_artifact_detection and is_clean
+                ):  # Only check others if no gap
                     if event_clean_flag == "unknown":
                         now = time.time()
                         if now - self._last_log_time > self._log_interval_s:
