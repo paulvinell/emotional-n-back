@@ -1,6 +1,8 @@
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Dict, List
+from typing import Dict, List, Optional
+
+from .reward import ZScorer
 
 
 class Sentiment(Enum):
@@ -167,11 +169,95 @@ class EfficientProcessingIndexModule(RewardModule):
         return p300_amp - lpp_late_amp
 
 
+class P300ZScoreRewardModule(RewardModule):
+    """
+    Replicates the original game's reward system by calculating a reward
+    based on the combined z-scores of P300 amplitude and latency.
+    """
+
+    def __init__(
+        self,
+        initial_calibration_trials: int = 10,
+        recalibration_interval: int = 10,
+        outlier_std_devs: Optional[float] = 3.0,
+        success_threshold: float = 0.5,
+        failure_threshold: float = -0.5,
+    ):
+        super().__init__(required_erps=["P300"])
+        self.amp_zscorer = ZScorer(
+            initial_calibration_trials,
+            recalibration_interval,
+            outlier_std_devs,
+        )
+        self.lat_zscorer = ZScorer(
+            initial_calibration_trials,
+            recalibration_interval,
+            outlier_std_devs,
+        )
+        self.success_threshold = success_threshold
+        self.failure_threshold = failure_threshold
+
+    def is_trial_type_applicable(
+        self, visual_sentiment: Sentiment, audio_sentiment: Sentiment
+    ) -> bool:
+        # Active on all trials, like the original system
+        return True
+
+    def update_calibrators(self, erp_data: Dict[str, Dict[str, float]]):
+        if "P300" in erp_data:
+            amp = erp_data["P300"].get("amp")
+            lat = erp_data["P300"].get("lat")
+            if amp is not None:
+                self.amp_zscorer.update(amp)
+            if lat is not None:
+                self.lat_zscorer.update(lat)
+
+    def recalibrate(self):
+        self.amp_zscorer.recalibrate_if_ready()
+        self.lat_zscorer.recalibrate_if_ready()
+
+    def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
+        if not self.amp_zscorer.is_calibrated() or not self.lat_zscorer.is_calibrated():
+            return 0.0
+
+        p300_data = erp_data.get("P300", {})
+        amp = p300_data.get("amp")
+        lat = p300_data.get("lat")
+
+        if amp is None or lat is None:
+            return 0.0
+
+        # Higher amplitude is better
+        z_amp = self.amp_zscorer.get_z_score(amp)
+        # Lower latency is better, so we invert the z-score
+        z_lat = -self.lat_zscorer.get_z_score(lat)
+
+        avg_z = (z_amp + z_lat) / 2
+
+        return avg_z
+
+
 class ModularReward:
     """A class that manages a list of reward modules."""
 
     def __init__(self, modules: List[RewardModule]):
         self.modules = modules
+
+    def update_calibrators(self, erp_data: Dict[str, Dict[str, float]]):
+        """
+        Calls the 'update_calibrators' method on any module that has it.
+        """
+        for module in self.modules:
+            if hasattr(module, "update_calibrators"):
+                module.update_calibrators(erp_data)
+
+    def recalibrate_modules(self):
+        """
+        Calls the 'recalibrate' method on any module that has it.
+        """
+        for module in self.modules:
+            if hasattr(module, "recalibrate"):
+                module.recalibrate()
 
     def calculate_total_reward(
         self,
@@ -188,6 +274,9 @@ class ModularReward:
                     repackaged_erps[comp_name] = comp_data
 
         available_erps = list(repackaged_erps.keys())
+
+        # Update any modules that use calibration
+        self.update_calibrators(repackaged_erps)
 
         total_reward = 0.0
         for module in self.modules:
