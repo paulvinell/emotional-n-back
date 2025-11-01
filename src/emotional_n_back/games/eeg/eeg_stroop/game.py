@@ -11,7 +11,8 @@ from emotional_n_back.data import (
 )
 
 from .erp_adapter import ErpAdapter
-from .reward import Calibration, Reward, Stats, ZScorePolicy
+from .reward import Reward
+from .reward_modules import ModularReward, P300ZScoreRewardModule
 from .state import GameState
 
 
@@ -98,15 +99,22 @@ class EEGStroopGame:
             fs_target=fs,
         )
 
-        self.calibration = Calibration()
-        self.reward_policy = ZScorePolicy()
-        self.stats: Optional[Stats] = None
+        self.modular_reward = ModularReward(
+            modules=[
+                P300ZScoreRewardModule(
+                    initial_calibration_trials=self.initial_calibration_trials,
+                    recalibration_interval=self.recalibration_interval,
+                    outlier_std_devs=self.outlier_std_devs,
+                )
+            ]
+        )
+        self.success_threshold = 0.5
+        self.failure_threshold = -0.5
 
         self.beep_success = make_beep(1300, 100, 0.5)
         self.beep_failure = make_beep(440, 200, 0.5)
 
         self.scoreable_trial_num = 0
-        self.recompute_stats_next_trial = False
 
     def start(self):
         self.erp_adapter.start()
@@ -131,19 +139,16 @@ class EEGStroopGame:
         return GameState.WAIT_EEG
 
     def _prepare_trial(self):
-        if self.recompute_stats_next_trial:
-            self.stats = self.calibration.compute(self.outlier_std_devs)
-            self.calibration.reset_batch()
-            self.recompute_stats_next_trial = False
+        self.modular_reward.recalibrate_modules()
         self.reward = Reward.NONE
-        visual_sentiment = random.choice(self.sentiments)
-        audio_sentiment = random.choice(self.sentiments)
+        self.visual_sentiment = random.choice(self.sentiments)
+        self.audio_sentiment = random.choice(self.sentiments)
         self.event_code = f"trial_{self.trial_num}"
 
-        image_path = self.kdef_loader.get_random_image(visual_sentiment)
+        image_path = self.kdef_loader.get_random_image(self.visual_sentiment)
         self.image_surface = self._load_fit_image(str(image_path), self.stimulus_rect)
 
-        audio_path = self.mav_loader.get_random_audio(audio_sentiment)
+        audio_path = self.mav_loader.get_random_audio(self.audio_sentiment)
         self.audio_sound = pygame.mixer.Sound(str(audio_path))
         if self.audio_sound is None:
             raise RuntimeError(f"Failed to load audio file: {audio_path}")
@@ -173,31 +178,41 @@ class EEGStroopGame:
         return GameState.RESPONSE
 
     def _process_erp_update(self, erp_update):
-        if erp_update and erp_update.amp is not None and erp_update.lat is not None:
-            self.calibration.update(erp_update.amp, erp_update.lat)
-            self.reward = self.reward_policy.decide(
-                erp_update.amp, erp_update.lat, self.stats
-            )
+        erp_data = {
+            self.erp_component: {
+                "amp": erp_update.amp,
+                "lat": erp_update.lat,
+            }
+        }
 
-            if self.recompute_stats_next_trial is False and self.calibration.ready(
-                self.initial_calibration_trials,
-                self.recalibration_interval,
-                self.stats is not None,
-            ):
-                self.recompute_stats_next_trial = True
+        # This now internally handles updating the calibrators
+        total_reward = self.modular_reward.calculate_total_reward(
+            visual_sentiment=self.visual_sentiment,
+            audio_sentiment=self.audio_sentiment,
+            erp_data=erp_data,
+        )
 
-            if self.stats is not None:
-                if self.reward == Reward.SUCCESS:
-                    self.beep_success.play()
-                    self.score += 1
-                elif self.reward == Reward.FAILURE:
-                    self.beep_failure.play()
+        # Discretize the final reward
+        if total_reward > self.success_threshold:
+            self.reward = Reward.SUCCESS
+        elif total_reward < self.failure_threshold:
+            self.reward = Reward.FAILURE
+        else:
+            self.reward = Reward.NONE
+
+        # Update score and provide feedback if the system is calibrated
+        if self.modular_reward.is_calibrated():
+            if self.reward == Reward.SUCCESS:
+                self.beep_success.play()
+                self.score += 1
+            elif self.reward == Reward.FAILURE:
+                self.beep_failure.play()
 
     def _feedback(self):
         if self.trial_duration_ms is not None:
             if pygame.time.get_ticks() - self.trial_start_t > self.trial_duration_ms:
                 self.trial_num += 1
-                if self.stats is not None:
+                if self.modular_reward.is_calibrated():
                     self.scoreable_trial_num += 1
                 return GameState.PREPARE_TRIAL
         return GameState.FEEDBACK
@@ -215,7 +230,7 @@ class EEGStroopGame:
     def get_trial_data(self):
         data = {
             "trial_num": self.trial_num,
-            "is_calibrating": self.stats is None,
+            "is_calibrating": not self.modular_reward.is_calibrated(),
             "stimulus_rect": self.stimulus_rect,
             "reward": self.reward,
             "score": self.score,

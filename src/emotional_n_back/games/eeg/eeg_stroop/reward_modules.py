@@ -180,8 +180,6 @@ class P300ZScoreRewardModule(RewardModule):
         initial_calibration_trials: int = 10,
         recalibration_interval: int = 10,
         outlier_std_devs: Optional[float] = 3.0,
-        success_threshold: float = 0.5,
-        failure_threshold: float = -0.5,
     ):
         super().__init__(required_erps=["P300"])
         self.amp_zscorer = ZScorer(
@@ -194,8 +192,6 @@ class P300ZScoreRewardModule(RewardModule):
             recalibration_interval,
             outlier_std_devs,
         )
-        self.success_threshold = success_threshold
-        self.failure_threshold = failure_threshold
 
     def is_trial_type_applicable(
         self, visual_sentiment: Sentiment, audio_sentiment: Sentiment
@@ -215,6 +211,9 @@ class P300ZScoreRewardModule(RewardModule):
     def recalibrate(self):
         self.amp_zscorer.recalibrate_if_ready()
         self.lat_zscorer.recalibrate_if_ready()
+
+    def is_calibrated(self) -> bool:
+        return self.amp_zscorer.is_calibrated() and self.lat_zscorer.is_calibrated()
 
     def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
         if not self.amp_zscorer.is_calibrated() or not self.lat_zscorer.is_calibrated():
@@ -259,29 +258,31 @@ class ModularReward:
             if hasattr(module, "recalibrate"):
                 module.recalibrate()
 
+    def is_calibrated(self) -> bool:
+        """Checks if all calibrating modules are ready."""
+        return all(
+            module.is_calibrated()
+            for module in self.modules
+            if hasattr(module, "is_calibrated")
+        )
+
     def calculate_total_reward(
         self,
         visual_sentiment: Sentiment,
         audio_sentiment: Sentiment,
-        erp_events: List[Dict],
+        erp_data: Dict[str, Dict[str, float]],
     ) -> float:
         """Calculates the total reward from all active modules based on ERP events."""
-
-        repackaged_erps: Dict[str, Dict[str, float]] = {}
-        for event in erp_events:
-            if event.get("type") == "erp_update" and "component" in event:
-                for comp_name, comp_data in event["component"].items():
-                    repackaged_erps[comp_name] = comp_data
-
-        available_erps = list(repackaged_erps.keys())
+        available_erps = list(erp_data.keys())
 
         # Update any modules that use calibration
-        self.update_calibrators(repackaged_erps)
+        self.update_calibrators(erp_data)
 
         total_reward = 0.0
         for module in self.modules:
             if module.is_trial_type_applicable(
                 visual_sentiment, audio_sentiment
             ) and module.has_required_erps(available_erps):
-                total_reward += module.calculate_reward(repackaged_erps)
+                total_reward += module.calculate_reward(erp_data)
+
         return total_reward
