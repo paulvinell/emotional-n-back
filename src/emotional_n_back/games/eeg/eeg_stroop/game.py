@@ -178,6 +178,11 @@ class EEGStroopGame:
         return GameState.RESPONSE
 
     def _process_erp_update(self, erp_update):
+        # Do not process or give feedback on trials with artifacts
+        if not erp_update.clean or erp_update.amp is None or erp_update.lat is None:
+            self.reward = Reward.NONE
+            return
+
         erp_data = {
             self.erp_component: {
                 "amp": erp_update.amp,

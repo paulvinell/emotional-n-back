@@ -3,9 +3,6 @@
 - We probably want different rewards for incongruent and congruent trials.
 - We want some notion of averaged rewards over a sliding window of trials and something that indicates amplitude and latency separately.
 
-Bug:
-- Something that was previously in the code base but was erased is that if artifact rejection is enabled, we should not give feedback on waves marked as clean=False.
-
 # Miscellaneous thoughts
 Consider what happens when there are multiple peaks? Pick first one?
 
