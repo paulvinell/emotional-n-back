@@ -12,8 +12,24 @@ class Sentiment(Enum):
 
 
 class RewardModule(ABC):
-    def __init__(self, required_erps: List[str]):
+    def __init__(
+        self,
+        required_erps: List[str],
+        enable_z_scoring: bool = False,
+        initial_calibration_trials: int = 10,
+        recalibration_interval: int = 10,
+        outlier_std_devs: Optional[float] = 3.0,
+    ):
         self.required_erps = required_erps
+        self.z_scorer = (
+            ZScorer(
+                initial_calibration_trials=initial_calibration_trials,
+                recalibration_interval=recalibration_interval,
+                outlier_std_devs=outlier_std_devs,
+            )
+            if enable_z_scoring
+            else None
+        )
 
     @abstractmethod
     def is_trial_type_applicable(
@@ -26,12 +42,56 @@ class RewardModule(ABC):
 
     @abstractmethod
     def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
-        """Calculates the reward based on ERP data."""
+        """Calculates the raw reward based on ERP data."""
         pass
 
     def has_required_erps(self, available_erps: List[str]) -> bool:
         """Checks if all required ERPs are available."""
         return all(erp in available_erps for erp in self.required_erps)
+
+    def update_calibrators(
+        self,
+        erp_data: Dict[str, Dict[str, float]],
+        visual_sentiment: Optional[Sentiment] = None,
+        audio_sentiment: Optional[Sentiment] = None,
+    ):
+        """Updates the internal z-scorer if enabled and applicable."""
+        if self.z_scorer:
+            # Only update if the trial type is applicable
+            if visual_sentiment and audio_sentiment:
+                if not self.is_trial_type_applicable(visual_sentiment, audio_sentiment):
+                    return
+
+            # Check if we have required ERPs
+            available_erps = list(erp_data.keys())
+            if not self.has_required_erps(available_erps):
+                return
+
+            raw_reward = self.calculate_reward(erp_data)
+            self.z_scorer.update(raw_reward)
+
+    def recalibrate(self):
+        """Recalibrates the z-scorer if enabled."""
+        if self.z_scorer:
+            self.z_scorer.recalibrate_if_ready()
+
+    def is_calibrated(self) -> bool:
+        """Checks if the z-scorer is calibrated."""
+        if self.z_scorer:
+            return self.z_scorer.is_calibrated()
+        return True  # If no z-scoring, we are always "calibrated" (or it doesn't matter)
+
+    def calculate_normalized_reward(
+        self, erp_data: Dict[str, Dict[str, float]]
+    ) -> float:
+        """Calculates the z-scored reward."""
+        raw_reward = self.calculate_reward(erp_data)
+        if self.z_scorer:
+            if self.z_scorer.is_calibrated():
+                return self.z_scorer.get_z_score(raw_reward)
+            else:
+                return 0.0
+        return raw_reward
 
 
 # Protocol A
@@ -181,7 +241,7 @@ class P300ZScoreRewardModule(RewardModule):
         recalibration_interval: int = 10,
         outlier_std_devs: Optional[float] = 3.0,
     ):
-        super().__init__(required_erps=["P300"])
+        super().__init__(required_erps=["P300"], enable_z_scoring=False)
         self.amp_zscorer = ZScorer(
             initial_calibration_trials,
             recalibration_interval,
@@ -199,7 +259,12 @@ class P300ZScoreRewardModule(RewardModule):
         # Active on all trials, like the original system
         return True
 
-    def update_calibrators(self, erp_data: Dict[str, Dict[str, float]]):
+    def update_calibrators(
+        self,
+        erp_data: Dict[str, Dict[str, float]],
+        visual_sentiment: Optional[Sentiment] = None,
+        audio_sentiment: Optional[Sentiment] = None,
+    ):
         if "P300" in erp_data:
             amp = erp_data["P300"].get("amp")
             lat = erp_data["P300"].get("lat")
@@ -239,16 +304,48 @@ class P300ZScoreRewardModule(RewardModule):
 class ModularReward:
     """A class that manages a list of reward modules."""
 
-    def __init__(self, modules: List[RewardModule]):
+    def __init__(
+        self,
+        modules: List[RewardModule],
+        enable_z_scoring: bool = False,
+        initial_calibration_trials: int = 10,
+        recalibration_interval: int = 10,
+        outlier_std_devs: Optional[float] = 3.0,
+    ):
         self.modules = modules
+        self.z_scorer = (
+            ZScorer(
+                initial_calibration_trials=initial_calibration_trials,
+                recalibration_interval=recalibration_interval,
+                outlier_std_devs=outlier_std_devs,
+            )
+            if enable_z_scoring
+            else None
+        )
 
-    def update_calibrators(self, erp_data: Dict[str, Dict[str, float]]):
+    def update_calibrators(
+        self,
+        erp_data: Dict[str, Dict[str, float]],
+        visual_sentiment: Optional[Sentiment] = None,
+        audio_sentiment: Optional[Sentiment] = None,
+    ):
         """
         Calls the 'update_calibrators' method on any module that has it.
         """
         for module in self.modules:
             if hasattr(module, "update_calibrators"):
-                module.update_calibrators(erp_data)
+                # Check signature to see if it accepts sentiments (for backward compatibility if needed, 
+                # though we updated the base class)
+                # But P300ZScoreRewardModule overrides it.
+                module.update_calibrators(
+                    erp_data,
+                    visual_sentiment=visual_sentiment,
+                    audio_sentiment=audio_sentiment,
+                )
+        
+        # Also update our own z-scorer if we have one, but we need the total reward first.
+        # This is tricky because calculate_total_reward calls this.
+        # We should probably separate the update logic or do it in calculate_total_reward.
 
     def recalibrate_modules(self):
         """
@@ -257,6 +354,9 @@ class ModularReward:
         for module in self.modules:
             if hasattr(module, "recalibrate"):
                 module.recalibrate()
+        
+        if self.z_scorer:
+            self.z_scorer.recalibrate_if_ready()
 
     def is_calibrated(self) -> bool:
         """Checks if all calibrating modules are ready."""
@@ -265,6 +365,9 @@ class ModularReward:
             for module in self.modules
             if hasattr(module, "is_calibrated")
         )
+        if self.z_scorer:
+            return all_modules_calibrated and self.z_scorer.is_calibrated()
+        return all_modules_calibrated
 
     def calculate_total_reward(
         self,
@@ -276,13 +379,45 @@ class ModularReward:
         available_erps = list(erp_data.keys())
 
         # Update any modules that use calibration
-        self.update_calibrators(erp_data)
+        self.update_calibrators(
+            erp_data,
+            visual_sentiment=visual_sentiment,
+            audio_sentiment=audio_sentiment,
+        )
 
         total_reward = 0.0
         for module in self.modules:
             if module.is_trial_type_applicable(
                 visual_sentiment, audio_sentiment
             ) and module.has_required_erps(available_erps):
-                total_reward += module.calculate_reward(erp_data)
+                total_reward += module.calculate_normalized_reward(erp_data)
 
         return total_reward
+
+    def calculate_normalized_total_reward(
+        self,
+        visual_sentiment: Sentiment,
+        audio_sentiment: Sentiment,
+        erp_data: Dict[str, Dict[str, float]],
+    ) -> float:
+        """Calculates the z-scored total reward."""
+        raw_total_reward = self.calculate_total_reward(
+            visual_sentiment, audio_sentiment, erp_data
+        )
+        
+        if self.z_scorer:
+            # Update the z-scorer with the new raw reward
+            # Note: We are updating here because this is where we get the final value.
+            # Ideally update should be separate but for simplicity we do it here or 
+            # we need to ensure it's called during the trial flow.
+            # However, calculate_total_reward is usually called once per trial for feedback.
+            # But wait, if we call this multiple times it might be an issue.
+            # Let's assume this is called once per valid trial.
+            self.z_scorer.update(raw_total_reward)
+            
+            if self.z_scorer.is_calibrated():
+                return self.z_scorer.get_z_score(raw_total_reward)
+            else:
+                return 0.0
+                
+        return raw_total_reward
