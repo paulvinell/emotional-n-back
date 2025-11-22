@@ -32,7 +32,11 @@ class GameRenderer:
 
     def draw_trial(self, trial_data):
         self.screen.fill((20, 22, 26))
-        self.draw_header(trial_data["trial_num"], trial_data["is_calibrating"])
+        self.draw_header(
+            trial_data["trial_num"],
+            trial_data["is_calibrating"],
+            trial_data.get("regular_trials_start_idx"),
+        )
         self.draw_stimulus_box(
             trial_data["stimulus_rect"], trial_data.get("image_surface")
         )
@@ -46,7 +50,11 @@ class GameRenderer:
 
     def draw_intro(self, trial_data):
         self.screen.fill((20, 22, 26))
-        self.draw_header(trial_data["trial_num"], trial_data["is_calibrating"])
+        self.draw_header(
+            trial_data["trial_num"],
+            trial_data["is_calibrating"],
+            trial_data.get("regular_trials_start_idx"),
+        )
         self.draw_stimulus_box(trial_data["stimulus_rect"])
         self.draw_scorebar(trial_data["score"], trial_data["scoreable_trial_num"])
         self.draw_fs(trial_data)
@@ -59,13 +67,19 @@ class GameRenderer:
         self.screen.blit(text, text_rect)
         pygame.display.flip()
 
-    def draw_header(self, trial_idx: int, calibrating: bool):
-        hdr = self.font_big.render(f"Trial {trial_idx + 1}", True, (235, 235, 235))
-        self.screen.blit(hdr, (24, 24))
+    def draw_header(
+        self,
+        trial_idx: int,
+        calibrating: bool,
+        regular_trials_start_idx: Optional[int] = None,
+    ):
+        if regular_trials_start_idx is None:
+            text = f"Calibration Trial {trial_idx + 1}"
+        else:
+            text = f"Trial {trial_idx - regular_trials_start_idx + 1}"
 
-        if calibrating:
-            calib_text = self.font_small.render("Calibrating...", True, (255, 255, 255))
-            self.screen.blit(calib_text, (24, 60))
+        hdr = self.font_big.render(text, True, (235, 235, 235))
+        self.screen.blit(hdr, (24, 24))
 
     def draw_scorebar(self, score: int, total: int):
         s_txt = self.font_small.render(f"Score: {score}/{total}", True, (200, 200, 200))

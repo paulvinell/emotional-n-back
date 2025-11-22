@@ -115,6 +115,7 @@ class EEGStroopGame:
         self.beep_failure = make_beep(440, 200, 0.5)
 
         self.scoreable_trial_num = 0
+        self.regular_trials_start_idx: Optional[int] = None
 
     def start(self):
         self.erp_adapter.start()
@@ -140,6 +141,10 @@ class EEGStroopGame:
 
     def _prepare_trial(self):
         self.modular_reward.recalibrate_modules()
+        
+        if self.modular_reward.is_calibrated() and self.regular_trials_start_idx is None:
+            self.regular_trials_start_idx = self.trial_num
+
         self.reward = Reward.NONE
         self.visual_sentiment = random.choice(self.sentiments)
         self.audio_sentiment = random.choice(self.sentiments)
@@ -212,13 +217,13 @@ class EEGStroopGame:
                 self.score += 1
             elif self.reward == Reward.FAILURE:
                 self.beep_failure.play()
+            
+            self.scoreable_trial_num += 1
 
     def _feedback(self):
         if self.trial_duration_ms is not None:
             if pygame.time.get_ticks() - self.trial_start_t > self.trial_duration_ms:
                 self.trial_num += 1
-                if self.modular_reward.is_calibrated():
-                    self.scoreable_trial_num += 1
                 return GameState.PREPARE_TRIAL
         return GameState.FEEDBACK
 
@@ -242,7 +247,10 @@ class EEGStroopGame:
             "scoreable_trial_num": self.scoreable_trial_num,
             "show_fs": self.show_fs,
             "fs": self.erp_adapter.effective_fs,
+            "fs": self.erp_adapter.effective_fs,
             "continuous_fs_est": self.erp_adapter.continuous_fs_est,
+            "initial_calibration_trials": self.initial_calibration_trials,
+            "regular_trials_start_idx": self.regular_trials_start_idx,
         }
 
         if self.state != GameState.INTRO:
