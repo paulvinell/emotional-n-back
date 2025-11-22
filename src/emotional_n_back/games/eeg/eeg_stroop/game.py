@@ -1,25 +1,23 @@
 import random
 from typing import Optional
 
-import numpy as np
 import pygame
 from pygame import Rect
 
-from emotional_n_back.data import (
-    KDEFSentimentLoader,
-    MAVSentimentLoader,
-)
-
 from .erp_adapter import ErpAdapter
 from .reward import Reward
-from .reward_modules import ModularReward, P300ZScoreRewardModule
+from .reward_modules import ModularReward, P300ZScoreRewardModule, Sentiment
 from .state import GameState
+from .trial_manager import TrialManager
+from .resources import ResourceManager
+from .render import RenderState
 
 
 def make_beep(
     frequency: int = 880, duration_ms: int = 120, volume: float = 0.5
 ) -> pygame.mixer.Sound:
     """Generate a sine beep as a pygame Sound. Assumes mixer is initialized."""
+    import numpy as np
     init = pygame.mixer.get_init()
     if init is None:
         raise RuntimeError("pygame.mixer not initialized")
@@ -64,33 +62,32 @@ class EEGStroopGame:
         self.stimulus_intro_ms = stimulus_intro_ms
         self.show_fs = show_fs
 
-        # Data Loaders
-        self.kdef_loader = KDEFSentimentLoader()
-        self.mav_loader = MAVSentimentLoader()
-        self.sentiments = self.mav_loader.sentiments
+        # Managers
+        self.trial_manager = TrialManager(initial_calibration_trials)
+        self.resource_manager = ResourceManager()
 
         # UI Layout
         W, H = window_size
         self.stimulus_rect = Rect(W // 2 - 220, 100, 440, 440)
 
         # Game State
-        self.trial_num = 0
-        self.score = 0
-        self._img_cache: dict[str, pygame.Surface] = {}
         self.state = GameState.WAIT_EEG
         self.trial_start_t = 0
         self.image_surface = None
         self.audio_sound = None
         self.event_code = ""
         self.reward = Reward.NONE
+        
+        self.visual_sentiment: Optional[Sentiment] = None
+        self.audio_sentiment: Optional[Sentiment] = None
 
         self.erp_component = erp_component
         self.trial_duration_ms = trial_duration_ms
-        self.initial_calibration_trials = initial_calibration_trials
-        if recalibration_interval < 2:
-            raise ValueError("recalibration_interval must be at least 2")
         self.recalibration_interval = recalibration_interval
         self.outlier_std_devs = outlier_std_devs
+        
+        if recalibration_interval < 2:
+            raise ValueError("recalibration_interval must be at least 2")
 
         self.erp_adapter = ErpAdapter(
             erp_component=self.erp_component,
@@ -102,7 +99,7 @@ class EEGStroopGame:
         self.modular_reward = ModularReward(
             modules=[
                 P300ZScoreRewardModule(
-                    initial_calibration_trials=self.initial_calibration_trials,
+                    initial_calibration_trials=initial_calibration_trials,
                     recalibration_interval=self.recalibration_interval,
                     outlier_std_devs=self.outlier_std_devs,
                 )
@@ -113,9 +110,6 @@ class EEGStroopGame:
 
         self.beep_success = make_beep(1300, 100, 0.5)
         self.beep_failure = make_beep(440, 200, 0.5)
-
-        self.scoreable_trial_num = 0
-        self.regular_trials_start_idx: Optional[int] = None
 
     def start(self):
         self.erp_adapter.start()
@@ -142,21 +136,18 @@ class EEGStroopGame:
     def _prepare_trial(self):
         self.modular_reward.recalibrate_modules()
         
-        if self.modular_reward.is_calibrated() and self.regular_trials_start_idx is None:
-            self.regular_trials_start_idx = self.trial_num
+        self.trial_manager.check_calibration_start(self.modular_reward.is_calibrated())
 
         self.reward = Reward.NONE
-        self.visual_sentiment = random.choice(self.sentiments)
-        self.audio_sentiment = random.choice(self.sentiments)
-        self.event_code = f"trial_{self.trial_num}"
+        self.visual_sentiment = self.resource_manager.get_random_sentiment()
+        self.audio_sentiment = self.resource_manager.get_random_sentiment()
+        self.event_code = f"trial_{self.trial_manager.trial_num}"
 
-        image_path = self.kdef_loader.get_random_image(self.visual_sentiment)
-        self.image_surface = self._load_fit_image(str(image_path), self.stimulus_rect)
+        image_path = self.resource_manager.get_random_image_path(self.visual_sentiment)
+        self.image_surface = self.resource_manager.load_fit_image(image_path, self.stimulus_rect)
 
-        audio_path = self.mav_loader.get_random_audio(self.audio_sentiment)
-        self.audio_sound = pygame.mixer.Sound(str(audio_path))
-        if self.audio_sound is None:
-            raise RuntimeError(f"Failed to load audio file: {audio_path}")
+        audio_path = self.resource_manager.get_random_audio_path(self.audio_sentiment)
+        self.audio_sound = self.resource_manager.load_audio(audio_path)
 
         self.trial_start_t = pygame.time.get_ticks()
         return GameState.INTRO
@@ -211,57 +202,46 @@ class EEGStroopGame:
             self.reward = Reward.NONE
 
         # Update score and provide feedback if the system is calibrated
-        if self.modular_reward.is_calibrated():
+        # We delegate the score update to TrialManager
+        is_calibrated = self.modular_reward.is_calibrated()
+        self.trial_manager.on_trial_complete(self.reward, is_calibrated)
+        
+        if is_calibrated:
             if self.reward == Reward.SUCCESS:
                 self.beep_success.play()
-                self.score += 1
             elif self.reward == Reward.FAILURE:
                 self.beep_failure.play()
-            
-            self.scoreable_trial_num += 1
 
     def _feedback(self):
         if self.trial_duration_ms is not None:
             if pygame.time.get_ticks() - self.trial_start_t > self.trial_duration_ms:
-                self.trial_num += 1
+                self.trial_manager.increment_trial_num()
                 return GameState.PREPARE_TRIAL
         return GameState.FEEDBACK
 
-    def _load_fit_image(self, path: str, box: Rect) -> pygame.Surface:
-        if path in self._img_cache:
-            return self._img_cache[path]
-        img = pygame.image.load(path).convert_alpha()
-        iw, ih = img.get_width(), img.get_height()
-        scale = min(box.w / iw, box.h / ih)
-        surf = pygame.transform.smoothscale(img, (int(iw * scale), int(ih * scale)))
-        self._img_cache[path] = surf
-        return surf
-
-    def get_trial_data(self):
-        data = {
-            "trial_num": self.trial_num,
-            "is_calibrating": not self.modular_reward.is_calibrated(),
-            "stimulus_rect": self.stimulus_rect,
-            "reward": self.reward,
-            "score": self.score,
-            "scoreable_trial_num": self.scoreable_trial_num,
-            "show_fs": self.show_fs,
-            "fs": self.erp_adapter.effective_fs,
-            "fs": self.erp_adapter.effective_fs,
-            "continuous_fs_est": self.erp_adapter.continuous_fs_est,
-            "initial_calibration_trials": self.initial_calibration_trials,
-            "regular_trials_start_idx": self.regular_trials_start_idx,
-        }
-
-        if self.state != GameState.INTRO:
-            data["image_surface"] = self.image_surface
-
-        return data
+    def get_render_state(self) -> RenderState:
+        trial_state = self.trial_manager.get_state(self.modular_reward.is_calibrated())
+        
+        return RenderState(
+            state=self.state,
+            trial_num=trial_state.trial_num,
+            score=trial_state.score,
+            scoreable_trial_num=trial_state.scoreable_trial_num,
+            is_calibrating=trial_state.is_calibrating,
+            regular_trials_start_idx=trial_state.regular_trials_start_idx,
+            stimulus_rect=self.stimulus_rect,
+            image_surface=self.image_surface if self.state != GameState.INTRO else None,
+            reward=self.reward,
+            show_fs=self.show_fs,
+            fs=self.erp_adapter.effective_fs,
+            continuous_fs_est=self.erp_adapter.continuous_fs_est,
+            initial_calibration_trials=self.trial_manager.initial_calibration_trials,
+        )
 
     def get_final_screen_data(self):
         return {
-            "trial_num": self.trial_num,
-            "score": self.score,
+            "trial_num": self.trial_manager.trial_num,
+            "score": self.trial_manager.score,
         }
 
     def shutdown(self):

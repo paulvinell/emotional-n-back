@@ -345,7 +345,7 @@ def eeg_stroop(
             ):
                 running = False
 
-        renderer.render_game(game)
+        renderer.render_game(game.get_render_state())
         renderer.clock.tick(60)
 
     game_thread.stop()

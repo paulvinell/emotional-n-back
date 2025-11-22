@@ -360,7 +360,7 @@ class ModularReward:
 
     def is_calibrated(self) -> bool:
         """Checks if all calibrating modules are ready."""
-        return all(
+        all_modules_calibrated = all(
             module.is_calibrated()
             for module in self.modules
             if hasattr(module, "is_calibrated")

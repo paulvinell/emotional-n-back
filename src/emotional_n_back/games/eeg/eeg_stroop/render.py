@@ -3,7 +3,26 @@ from typing import Optional
 import pygame
 
 from .reward import Reward
+from dataclasses import dataclass
+from .reward import Reward
 from .state import GameState
+
+
+@dataclass
+class RenderState:
+    state: GameState
+    trial_num: int
+    score: int
+    scoreable_trial_num: int
+    is_calibrating: bool
+    regular_trials_start_idx: Optional[int]
+    stimulus_rect: pygame.Rect
+    image_surface: Optional[pygame.Surface]
+    reward: Reward
+    show_fs: bool
+    fs: float
+    continuous_fs_est: float
+    initial_calibration_trials: int
 
 
 class GameRenderer:
@@ -16,48 +35,47 @@ class GameRenderer:
         self.font_big = pygame.font.SysFont(None, 48)
         self.font_small = pygame.font.SysFont(None, 24)
 
-    def render_game(self, game):
+    def render_game(self, render_state: RenderState):
         self.screen.fill((20, 22, 26))
-        trial_data = game.get_trial_data()
 
-        if game.state == GameState.WAIT_EEG:
+        if render_state.state == GameState.WAIT_EEG:
             self.draw_waiting_eeg()
-        elif game.state == GameState.INTRO:
-            self.draw_intro(trial_data)
-        elif game.state in [GameState.STIMULUS, GameState.RESPONSE, GameState.FEEDBACK]:
-            self.draw_trial(trial_data)
-        elif game.state == GameState.FINAL_SCREEN:
-            self.draw_final_screen(game.get_final_screen_data())
+        elif render_state.state == GameState.INTRO:
+            self.draw_intro(render_state)
+        elif render_state.state in [
+            GameState.STIMULUS,
+            GameState.RESPONSE,
+            GameState.FEEDBACK,
+        ]:
+            self.draw_trial(render_state)
+        elif render_state.state == GameState.FINAL_SCREEN:
+            self.draw_final_screen(render_state)
         pygame.display.flip()
 
-    def draw_trial(self, trial_data):
+    def draw_trial(self, state: RenderState):
         self.screen.fill((20, 22, 26))
         self.draw_header(
-            trial_data["trial_num"],
-            trial_data["is_calibrating"],
-            trial_data.get("regular_trials_start_idx"),
+            state.trial_num,
+            state.is_calibrating,
+            state.regular_trials_start_idx,
         )
-        self.draw_stimulus_box(
-            trial_data["stimulus_rect"], trial_data.get("image_surface")
-        )
-        if trial_data.get("reward") is not None:
-            self.draw_feedback_overlay(
-                trial_data["stimulus_rect"], trial_data["reward"]
-            )
-        self.draw_scorebar(trial_data["score"], trial_data["scoreable_trial_num"])
-        self.draw_fs(trial_data)
+        self.draw_stimulus_box(state.stimulus_rect, state.image_surface)
+        if state.reward is not None:
+            self.draw_feedback_overlay(state.stimulus_rect, state.reward)
+        self.draw_scorebar(state.score, state.scoreable_trial_num)
+        self.draw_fs(state)
         pygame.display.flip()
 
-    def draw_intro(self, trial_data):
+    def draw_intro(self, state: RenderState):
         self.screen.fill((20, 22, 26))
         self.draw_header(
-            trial_data["trial_num"],
-            trial_data["is_calibrating"],
-            trial_data.get("regular_trials_start_idx"),
+            state.trial_num,
+            state.is_calibrating,
+            state.regular_trials_start_idx,
         )
-        self.draw_stimulus_box(trial_data["stimulus_rect"])
-        self.draw_scorebar(trial_data["score"], trial_data["scoreable_trial_num"])
-        self.draw_fs(trial_data)
+        self.draw_stimulus_box(state.stimulus_rect)
+        self.draw_scorebar(state.score, state.scoreable_trial_num)
+        self.draw_fs(state)
         pygame.display.flip()
 
     def draw_waiting_eeg(self):
@@ -85,10 +103,10 @@ class GameRenderer:
         s_txt = self.font_small.render(f"Score: {score}/{total}", True, (200, 200, 200))
         self.screen.blit(s_txt, (24, self.screen.get_height() - 30))
 
-    def draw_fs(self, trial_data):
-        if not trial_data.get("show_fs"):
+    def draw_fs(self, state: RenderState):
+        if not state.show_fs:
             return
-        fs = trial_data.get("continuous_fs_est", 0)
+        fs = state.continuous_fs_est
         fs_text = self.font_small.render(f"fs: {fs:.1f} Hz", True, (200, 200, 200))
         text_rect = fs_text.get_rect()
         text_rect.bottomright = self.screen.get_rect().bottomright
@@ -114,13 +132,11 @@ class GameRenderer:
         overlay.fill(fill)
         self.screen.blit(overlay, rect.topleft)
 
-    def draw_final_screen(self, final_screen_data):
+    def draw_final_screen(self, state: RenderState):
         self.screen.fill((20, 22, 26))
-        final_trials = max(1, final_screen_data["trial_num"])
-        acc = 100.0 * (final_screen_data["score"] / final_trials)
-        summary = (
-            f"Done! Score: {final_screen_data['score']}/{final_trials} ({acc:.1f}%)"
-        )
+        final_trials = max(1, state.trial_num)
+        acc = 100.0 * (state.score / final_trials)
+        summary = f"Done! Score: {state.score}/{final_trials} ({acc:.1f}%)"
         s_surf = self.font_big.render(summary, True, (255, 255, 255))
         self.screen.blit(
             s_surf,
