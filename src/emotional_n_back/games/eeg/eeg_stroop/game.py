@@ -6,7 +6,8 @@ from pygame import Rect
 
 from .erp_adapter import ErpAdapter
 from .reward import Reward
-from .reward_modules import ModularReward, P300ZScoreRewardModule, Sentiment
+from .reward_modules import ModularReward, Sentiment
+from .protocols import ProtocolFactory
 from .state import GameState
 from .trial_manager import TrialManager
 from .resources import ResourceManager
@@ -96,14 +97,13 @@ class EEGStroopGame:
             fs_target=fs,
         )
 
-        self.modular_reward = ModularReward(
-            modules=[
-                P300ZScoreRewardModule(
-                    initial_calibration_trials=initial_calibration_trials,
-                    recalibration_interval=self.recalibration_interval,
-                    outlier_std_devs=self.outlier_std_devs,
-                )
-            ]
+        # Use the "Original" protocol by default, which replicates the old behavior
+        # but using the new data-driven architecture.
+        self.modular_reward = ProtocolFactory.create_protocol(
+            "Original",
+            initial_calibration_trials=initial_calibration_trials,
+            recalibration_interval=self.recalibration_interval,
+            outlier_std_devs=self.outlier_std_devs,
         )
         self.success_threshold = 0.5
         self.failure_threshold = -0.5

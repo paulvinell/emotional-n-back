@@ -1,6 +1,8 @@
+import math
 from abc import ABC, abstractmethod
 from enum import Enum, auto
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
+from dataclasses import dataclass
 
 from .reward import ZScorer
 
@@ -71,7 +73,8 @@ class RewardModule(ABC):
                 return
 
             raw_reward = self.calculate_reward(erp_data)
-            self.z_scorer.update(raw_reward)
+            if math.isfinite(raw_reward):
+                self.z_scorer.update(raw_reward)
 
     def recalibrate(self):
         """Recalibrates the z-scorer if enabled."""
@@ -97,117 +100,99 @@ class RewardModule(ABC):
         return raw_reward
 
 
-# Protocol A
-class FluentEngageModule(RewardModule):
-    """Boost P300 on congruent targets."""
+@dataclass
+class TrialFilter:
+    """Defines conditions for when a reward module applies."""
+    sentiments: Optional[Set[Sentiment]] = None
+    congruence: Optional[bool] = None  # True=Congruent, False=Incongruent, None=Any
 
-    def __init__(self):
-        super().__init__(name="FluentEngage", required_erps=["P300"])
+    def __call__(self, visual_sentiment: Sentiment, audio_sentiment: Sentiment) -> bool:
+        # Check congruence
+        if self.congruence is not None:
+            is_congruent = visual_sentiment == audio_sentiment
+            if self.congruence != is_congruent:
+                return False
 
-    def is_trial_type_applicable(
+        # Check sentiments (if any sentiment matches)
+        if self.sentiments:
+            if (visual_sentiment not in self.sentiments) and (
+                audio_sentiment not in self.sentiments
+            ):
+                return False
+
+        return True
+
+
+@dataclass
+class FeatureExtractor:
+    """Defines what to measure from the ERP data."""
+    component: str
+    metric: str  # "amp" or "lat"
+    inverse: bool = False  # True if smaller is better (e.g. latency, or negative N200)
+
+    def __call__(self, erp_data: Dict[str, Dict[str, float]]) -> float:
+        val = erp_data.get(self.component, {}).get(self.metric)
+        if val is None:
+            return 0.0
+        
+        if self.inverse:
+            # For N200 (negative), we want more negative, so we invert.
+            # For latency, we want smaller, so we invert (conceptually).
+            # But wait, standard z-scoring assumes higher is better.
+            # If we want "more negative" (e.g. -10 is better than -5), 
+            # we should actually just negate it? -(-10) = 10, -(-5) = 5. Yes.
+            # If we want "smaller latency" (e.g. 300 is better than 400),
+            # we should negate it? -300 > -400. Yes.
+            return -val
+        return val
+
+
+class GenericRewardModule(RewardModule):
+    """A data-driven reward module configured by filter and extractor."""
+
+    def __init__(
         self,
-        visual_sentiment: Sentiment,
-        audio_sentiment: Sentiment,
-    ) -> bool:
-        is_congruent = visual_sentiment == audio_sentiment
-        return is_congruent
-
-    def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
-        # Reward larger P300 amplitude
-        return erp_data.get("P300", {}).get("amp", 0.0)
-
-
-# Protocol B
-class ClearAndLetGoModule(RewardModule):
-    """Reduce late LPP on negative incongruent trials."""
-
-    def __init__(self):
-        super().__init__(name="ClearAndLetGo", required_erps=["LPP_late"])
-
-    def is_trial_type_applicable(
-        self,
-        visual_sentiment: Sentiment,
-        audio_sentiment: Sentiment,
-    ) -> bool:
-        is_incongruent = visual_sentiment != audio_sentiment
-        is_negative_present = (
-            visual_sentiment == Sentiment.NEGATIVE
-            or audio_sentiment == Sentiment.NEGATIVE
+        name: str,
+        trial_filter: TrialFilter,
+        extractor: FeatureExtractor,
+        enable_z_scoring: bool = True,
+        initial_calibration_trials: int = 10,
+        recalibration_interval: int = 10,
+        outlier_std_devs: Optional[float] = 3.0,
+    ):
+        super().__init__(
+            name=name,
+            required_erps=[extractor.component],
+            enable_z_scoring=enable_z_scoring,
+            initial_calibration_trials=initial_calibration_trials,
+            recalibration_interval=recalibration_interval,
+            outlier_std_devs=outlier_std_devs,
         )
-        return is_incongruent and is_negative_present
-
-    def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
-        # Reward smaller LPP_late amplitude (inverse relationship)
-        amp = erp_data.get("LPP_late", {}).get("amp", 0.0)
-        return 1.0 / (amp + 1e-6)  # Add epsilon to avoid division by zero
-
-
-# Protocol C
-class FastConflictDetectModule(RewardModule):
-    """Enhance N200 on incongruent trials."""
-
-    def __init__(self):
-        super().__init__(name="FastConflictDetect", required_erps=["N200"])
+        self.trial_filter = trial_filter
+        self.extractor = extractor
 
     def is_trial_type_applicable(
         self,
         visual_sentiment: Sentiment,
         audio_sentiment: Sentiment,
     ) -> bool:
-        is_incongruent = visual_sentiment != audio_sentiment
-        return is_incongruent
+        return self.trial_filter(visual_sentiment, audio_sentiment)
 
     def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
-        # N200 is negative, so a more negative value is better.
-        return -erp_data.get("N200", {}).get("amp", 0.0)
+        return self.extractor(erp_data)
 
 
-# Protocol D
-class BidirectionalPositiveLPPModule(RewardModule):
-    """Increase LPP for positive-congruent trials."""
+# Special case for composite modules (like Protocol E's index)
+# We can implement them as GenericRewardModule with a custom extractor 
+# or keep them as subclasses if they are truly complex.
+# Protocol E: Index = z(P300) - z(LPP_late). This requires z-scoring *before* combination?
+# Or just raw combination? The protocol says "Index = z(P300) - z(LPP)".
+# This implies we need access to z-scores inside the calculation.
+# Our current architecture z-scores the *result* of calculate_reward.
+# So we might need a CompositeRewardModule or just keep specific classes for complex logic.
+# Let's keep EfficientProcessingIndexModule and P300ZScoreRewardModule as they are complex.
+# But we can replace the simple ones.
 
-    def __init__(self):
-        super().__init__(name="BidirectionalPositiveLPP", required_erps=["LPP_early"])
-
-    def is_trial_type_applicable(
-        self,
-        visual_sentiment: Sentiment,
-        audio_sentiment: Sentiment,
-    ) -> bool:
-        is_congruent_positive = (
-            visual_sentiment == Sentiment.POSITIVE
-            and audio_sentiment == Sentiment.POSITIVE
-        )
-        return is_congruent_positive
-
-    def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
-        return erp_data.get("LPP_early", {}).get("amp", 0.0)
-
-
-class BidirectionalNegativeLPPModule(RewardModule):
-    """Decrease LPP for negative-incongruent trials."""
-
-    def __init__(self):
-        super().__init__(name="BidirectionalNegativeLPP", required_erps=["LPP_late"])
-
-    def is_trial_type_applicable(
-        self,
-        visual_sentiment: Sentiment,
-        audio_sentiment: Sentiment,
-    ) -> bool:
-        is_incongruent = visual_sentiment != audio_sentiment
-        is_negative_present = (
-            visual_sentiment == Sentiment.NEGATIVE
-            or audio_sentiment == Sentiment.NEGATIVE
-        )
-        return is_incongruent and is_negative_present
-
-    def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
-        amp = erp_data.get("LPP_late", {}).get("amp", 0.0)
-        return 1.0 / (amp + 1e-6)
-
-
-# Protocol E
 class EfficientProcessingIndexModule(RewardModule):
     """High P300, Low LPP-late on task-relevant (emotional) trials."""
 
@@ -229,79 +214,10 @@ class EfficientProcessingIndexModule(RewardModule):
         p300_amp = erp_data.get("P300", {}).get("amp", 0.0)
         lpp_late_amp = erp_data.get("LPP_late", {}).get("amp", 0.0)
         # Rough index: P300 amp - LPP_late amp
+        # Note: This is a raw difference, z-scoring happens after.
         return p300_amp - lpp_late_amp
 
 
-class P300ZScoreRewardModule(RewardModule):
-    """
-    Replicates the original game's reward system by calculating a reward
-    based on the combined z-scores of P300 amplitude and latency.
-    """
-
-    def __init__(
-        self,
-        initial_calibration_trials: int = 10,
-        recalibration_interval: int = 10,
-        outlier_std_devs: Optional[float] = 3.0,
-    ):
-        super().__init__(name="P300ZScore", required_erps=["P300"], enable_z_scoring=False)
-        self.amp_zscorer = ZScorer(
-            initial_calibration_trials,
-            recalibration_interval,
-            outlier_std_devs,
-        )
-        self.lat_zscorer = ZScorer(
-            initial_calibration_trials,
-            recalibration_interval,
-            outlier_std_devs,
-        )
-
-    def is_trial_type_applicable(
-        self, visual_sentiment: Sentiment, audio_sentiment: Sentiment
-    ) -> bool:
-        # Active on all trials, like the original system
-        return True
-
-    def update_calibrators(
-        self,
-        erp_data: Dict[str, Dict[str, float]],
-        visual_sentiment: Optional[Sentiment] = None,
-        audio_sentiment: Optional[Sentiment] = None,
-    ):
-        if "P300" in erp_data:
-            amp = erp_data["P300"].get("amp")
-            lat = erp_data["P300"].get("lat")
-            if amp is not None:
-                self.amp_zscorer.update(amp)
-            if lat is not None:
-                self.lat_zscorer.update(lat)
-
-    def recalibrate(self):
-        self.amp_zscorer.recalibrate_if_ready()
-        self.lat_zscorer.recalibrate_if_ready()
-
-    def is_calibrated(self) -> bool:
-        return self.amp_zscorer.is_calibrated() and self.lat_zscorer.is_calibrated()
-
-    def calculate_reward(self, erp_data: Dict[str, Dict[str, float]]) -> float:
-        if not self.amp_zscorer.is_calibrated() or not self.lat_zscorer.is_calibrated():
-            return 0.0
-
-        p300_data = erp_data.get("P300", {})
-        amp = p300_data.get("amp")
-        lat = p300_data.get("lat")
-
-        if amp is None or lat is None:
-            return 0.0
-
-        # Higher amplitude is better
-        z_amp = self.amp_zscorer.get_z_score(amp)
-        # Lower latency is better, so we invert the z-score
-        z_lat = -self.lat_zscorer.get_z_score(lat)
-
-        avg_z = (z_amp + z_lat) / 2
-
-        return avg_z
 
 
 class ModularReward:

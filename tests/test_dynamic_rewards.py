@@ -1,15 +1,30 @@
 import pytest
 from emotional_n_back.games.eeg.eeg_stroop.reward_modules import (
     ModularReward,
-    FluentEngageModule,
-    ClearAndLetGoModule,
+    GenericRewardModule,
+    TrialFilter,
+    FeatureExtractor,
     Sentiment,
 )
 from emotional_n_back.games.eeg.eeg_stroop.protocols import ProtocolFactory
 
+def create_fluent_engage_module():
+    return GenericRewardModule(
+        name="FluentEngage",
+        trial_filter=TrialFilter(congruence=True),
+        extractor=FeatureExtractor(component="P300", metric="amp"),
+    )
+
+def create_clear_and_let_go_module():
+    return GenericRewardModule(
+        name="ClearAndLetGo",
+        trial_filter=TrialFilter(congruence=False, sentiments={Sentiment.NEGATIVE}),
+        extractor=FeatureExtractor(component="LPP_late", metric="amp", inverse=True),
+    )
+
 def test_enable_disable_module():
-    m1 = FluentEngageModule()
-    m2 = ClearAndLetGoModule()
+    m1 = create_fluent_engage_module()
+    m2 = create_clear_and_let_go_module()
     modular_reward = ModularReward(modules=[m1, m2])
     
     assert m1.enabled
@@ -23,8 +38,8 @@ def test_enable_disable_module():
     assert m1.enabled
 
 def test_set_active_modules():
-    m1 = FluentEngageModule()
-    m2 = ClearAndLetGoModule()
+    m1 = create_fluent_engage_module()
+    m2 = create_clear_and_let_go_module()
     modular_reward = ModularReward(modules=[m1, m2])
     
     modular_reward.set_active_modules(["ClearAndLetGo"])
@@ -36,7 +51,7 @@ def test_set_active_modules():
     assert m2.enabled
 
 def test_disabled_module_no_contribution():
-    m1 = FluentEngageModule() # P300
+    m1 = create_fluent_engage_module() # P300
     # Note: enable_z_scoring defaults to True now, but for this test we want raw values
     # or we need to mock the z-scorer.
     # Let's disable z-scoring on the module for this test to verify aggregation logic
@@ -47,6 +62,7 @@ def test_disabled_module_no_contribution():
     erp_data = {"P300": {"amp": 10.0}}
     
     # Enabled
+    # Congruent trial required for FluentEngage
     reward = modular_reward.calculate_total_reward(Sentiment.POSITIVE, Sentiment.POSITIVE, erp_data)
     assert reward == 10.0
     
@@ -56,10 +72,10 @@ def test_disabled_module_no_contribution():
     assert reward == 0.0
 
 def test_averaging_logic():
-    m1 = FluentEngageModule()
+    m1 = create_fluent_engage_module()
     m1.z_scorer = None # Disable z-scoring for deterministic testing
     
-    m2 = ClearAndLetGoModule()
+    m2 = create_clear_and_let_go_module()
     m2.z_scorer = None
     
     modular_reward = ModularReward(modules=[m1, m2])
@@ -70,28 +86,22 @@ def test_averaging_logic():
         "LPP_late": {"amp": 0.5}
     }
     
-    # Both applicable (hack: force applicability for test)
-    # Actually, let's use a trial type where both are applicable?
-    # FluentEngage: Congruent
-    # ClearAndLetGo: Incongruent + Negative
-    # They are mutually exclusive by definition!
-    # So we need to mock is_trial_type_applicable or use a different set of modules.
-    
-    # Let's mock
+    # Let's mock is_trial_type_applicable to force both to be active
+    # (Since they are mutually exclusive in reality)
     m1.is_trial_type_applicable = lambda v, a: True
     m2.is_trial_type_applicable = lambda v, a: True
     
     reward = modular_reward.calculate_total_reward(Sentiment.POSITIVE, Sentiment.POSITIVE, erp_data)
     
     # m1 reward: 10.0
-    # m2 reward: 2.0 (approx)
-    # average: 6.0 (approx)
-    assert reward == pytest.approx(6.0, rel=1e-4)
+    # m2 reward: -0.5 (linear inverse: -0.5)
+    # average: (10.0 - 0.5) / 2 = 4.75
+    assert reward == pytest.approx(4.75, rel=1e-4)
 
 def test_protocol_factory():
     pA = ProtocolFactory.create_protocol("A")
     assert len(pA.modules) == 1
-    assert isinstance(pA.modules[0], FluentEngageModule)
+    assert pA.modules[0].name == "FluentEngage"
     
     pD = ProtocolFactory.create_protocol("D")
     assert len(pD.modules) == 2
