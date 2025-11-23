@@ -220,15 +220,14 @@ class EEGStroopGame:
         return GameState.FEEDBACK
 
     def get_render_state(self) -> RenderState:
-        trial_state = self.trial_manager.get_state(self.modular_reward.is_calibrated())
+        trial_state = self.trial_manager.get_state()
         
         return RenderState(
             state=self.state,
-            trial_num=trial_state.trial_num,
+            display_text=trial_state.display_text,
             score=trial_state.score,
             scoreable_trial_num=trial_state.scoreable_trial_num,
             is_calibrating=trial_state.is_calibrating,
-            regular_trials_start_idx=trial_state.regular_trials_start_idx,
             stimulus_rect=self.stimulus_rect,
             image_surface=self.image_surface if self.state != GameState.INTRO else None,
             reward=self.reward,

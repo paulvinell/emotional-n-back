@@ -11,11 +11,10 @@ from .state import GameState
 @dataclass
 class RenderState:
     state: GameState
-    trial_num: int
+    display_text: str
     score: int
     scoreable_trial_num: int
     is_calibrating: bool
-    regular_trials_start_idx: Optional[int]
     stimulus_rect: pygame.Rect
     image_surface: Optional[pygame.Surface]
     reward: Reward
@@ -29,11 +28,12 @@ class GameRenderer:
     def __init__(self, window_size=(900, 650)):
         pygame.init()
         pygame.mixer.init(frequency=44100, size=-16, channels=2, buffer=512)
+        pygame.font.init()
         self.screen = pygame.display.set_mode(window_size)
         pygame.display.set_caption("EEG Stroop Game")
         self.clock = pygame.time.Clock()
-        self.font_big = pygame.font.SysFont(None, 48)
-        self.font_small = pygame.font.SysFont(None, 24)
+        self.font = pygame.font.SysFont(None, 24)
+        self.large_font = pygame.font.SysFont(None, 48)
 
     def render_game(self, render_state: RenderState):
         self.screen.fill((20, 22, 26))
@@ -54,69 +54,48 @@ class GameRenderer:
 
     def draw_trial(self, state: RenderState):
         self.screen.fill((20, 22, 26))
-        self.draw_header(
-            state.trial_num,
-            state.is_calibrating,
-            state.regular_trials_start_idx,
-        )
+        self.draw_header(state)
         self.draw_stimulus_box(state.stimulus_rect, state.image_surface)
         if state.reward is not None:
             self.draw_feedback_overlay(state.stimulus_rect, state.reward)
         self.draw_scorebar(state.score, state.scoreable_trial_num)
         self.draw_fs(state)
-        pygame.display.flip()
 
     def draw_intro(self, state: RenderState):
         self.screen.fill((20, 22, 26))
-        self.draw_header(
-            state.trial_num,
-            state.is_calibrating,
-            state.regular_trials_start_idx,
-        )
+        self.draw_header(state)
         self.draw_stimulus_box(state.stimulus_rect)
         self.draw_scorebar(state.score, state.scoreable_trial_num)
         self.draw_fs(state)
         pygame.display.flip()
 
     def draw_waiting_eeg(self):
-        text = self.font_big.render("Waiting for EEG stream...", True, (255, 255, 255))
+        text = self.large_font.render("Waiting for EEG stream...", True, (255, 255, 255))
         text_rect = text.get_rect(center=self.screen.get_rect().center)
         self.screen.fill((20, 22, 26))
         self.screen.blit(text, text_rect)
         pygame.display.flip()
 
-    def draw_header(
-        self,
-        trial_idx: int,
-        calibrating: bool,
-        regular_trials_start_idx: Optional[int] = None,
-    ):
-        if regular_trials_start_idx is None:
-            text = f"Calibration Trial {trial_idx + 1}"
-        else:
-            text = f"Trial {trial_idx - regular_trials_start_idx + 1}"
-
-        hdr = self.font_big.render(text, True, (235, 235, 235))
+    def draw_header(self, state: RenderState):
+        hdr = self.large_font.render(state.display_text, True, (235, 235, 235))
         self.screen.blit(hdr, (24, 24))
 
     def draw_scorebar(self, score: int, total: int):
-        s_txt = self.font_small.render(f"Score: {score}/{total}", True, (200, 200, 200))
+        s_txt = self.font.render(f"Score: {score}/{total}", True, (200, 200, 200))
         self.screen.blit(s_txt, (24, self.screen.get_height() - 30))
 
     def draw_fs(self, state: RenderState):
         if not state.show_fs:
             return
         fs = state.continuous_fs_est
-        fs_text = self.font_small.render(f"fs: {fs:.1f} Hz", True, (200, 200, 200))
+        fs_text = self.font.render(f"fs: {fs:.1f} Hz", True, (200, 200, 200))
         text_rect = fs_text.get_rect()
         text_rect.bottomright = self.screen.get_rect().bottomright
         text_rect.x -= 10
         text_rect.y -= 10
         self.screen.blit(fs_text, text_rect)
 
-    def draw_stimulus_box(
-        self, rect: pygame.Rect, image_surface: Optional[pygame.Surface] = None
-    ):
+    def draw_stimulus_box(self, rect: pygame.Rect, image_surface: Optional[pygame.Surface] = None):
         pygame.draw.rect(self.screen, (60, 60, 65), rect, border_radius=12)
         pygame.draw.rect(self.screen, (160, 160, 170), rect, width=2, border_radius=12)
         if image_surface:
